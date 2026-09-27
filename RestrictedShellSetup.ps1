@@ -414,6 +414,18 @@ function Test-PathWritableByPrincipals {
         }
 
         $acl = Get-Acl -LiteralPath $candidate
+        try {
+            $ownerSid = ([Security.Principal.NTAccount]$acl.Owner).Translate(
+                [Security.Principal.SecurityIdentifier]
+            ).Value
+            if ($PrincipalSids.Contains($ownerSid)) {
+                return $true
+            }
+        }
+        catch {
+            # If owner translation fails, explicit ACLs are still checked below.
+        }
+
         foreach ($rule in $acl.Access) {
             if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) {
                 continue
@@ -444,7 +456,7 @@ function Assert-SecureLaunchPath {
 
     $fullPath = [IO.Path]::GetFullPath($Path)
     if (Test-PathWritableByPrincipals $fullPath $PrincipalSids) {
-        throw "$Description is writable or replaceable by the restricted user: $fullPath`nChoose a file in an administrator-controlled location such as Program Files or C:\ProgramData\RestrictedShell."
+        throw "$Description is writable, owned, or replaceable by the restricted user: $fullPath`nChoose a file in an administrator-controlled location such as Program Files or C:\ProgramData\RestrictedShell."
     }
 }
 
@@ -455,11 +467,24 @@ function Resolve-PythonInterpreter {
         '.pyw',
         [StringComparison]::OrdinalIgnoreCase
     )
-    $names = if ($windowed) { @('pyw.exe', 'pythonw.exe') } else { @('py.exe', 'python.exe') }
+    $name = if ($windowed) { 'pythonw.exe' } else { 'python.exe' }
     $candidates = [Collections.Generic.List[string]]::new()
 
-    foreach ($name in $names) {
-        $candidates.Add((Join-Path $env:WINDIR $name))
+    foreach ($registryRoot in @(
+        'HKLM:\SOFTWARE\Python\PythonCore',
+        'HKLM:\SOFTWARE\WOW6432Node\Python\PythonCore'
+    )) {
+        if (-not (Test-Path $registryRoot)) {
+            continue
+        }
+
+        foreach ($versionKey in Get-ChildItem $registryRoot -ErrorAction SilentlyContinue) {
+            $installKey = Join-Path $versionKey.PSPath 'InstallPath'
+            $installPath = (Get-Item $installKey -ErrorAction SilentlyContinue).GetValue('')
+            if ($installPath) {
+                $candidates.Add((Join-Path $installPath $name))
+            }
+        }
     }
 
     foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, 'C:\')) {
@@ -467,10 +492,8 @@ function Resolve-PythonInterpreter {
             continue
         }
 
-        foreach ($name in $names) {
-            Get-ChildItem -LiteralPath $root -Directory -Filter 'Python*' -ErrorAction SilentlyContinue |
-                ForEach-Object { $candidates.Add((Join-Path $_.FullName $name)) }
-        }
+        Get-ChildItem -LiteralPath $root -Directory -Filter 'Python*' -ErrorAction SilentlyContinue |
+            ForEach-Object { $candidates.Add((Join-Path $_.FullName $name)) }
     }
 
     foreach ($candidate in $candidates | Select-Object -Unique) {
@@ -479,7 +502,7 @@ function Resolve-PythonInterpreter {
         }
     }
 
-    throw "No machine-wide Python interpreter was found for $([IO.Path]::GetExtension($ScriptPath)) pre-run script. Install Python for all users, or launch a trusted interpreter executable directly."
+    throw "No machine-wide $name was found for the Python pre-run script. Install Python for all users, or launch a trusted interpreter executable directly."
 }
 
 function Convert-IconHandleToBitmap {
