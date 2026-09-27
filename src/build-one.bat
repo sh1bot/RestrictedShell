@@ -20,7 +20,7 @@ if errorlevel 1 exit /b %errorlevel%
 
 link /nologo RestrictedShell-%ARCH%.obj SecurityEntry-%ARCH%.obj ^
  kernel32.lib user32.lib gdi32.lib ole32.lib advapi32.lib ^
- libvcruntime.lib bufferoverflowU.lib ^
+ libcmt.lib bufferoverflowU.lib ^
  /SUBSYSTEM:WINDOWS /ENTRY:secure_entry /NODEFAULTLIB ^
  /DYNAMICBASE /NXCOMPAT /guard:cf ^
  /OPT:REF /OPT:ICF /LTCG ^
