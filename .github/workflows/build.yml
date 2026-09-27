@@ -47,20 +47,28 @@ jobs:
         with:
           path: artifacts
 
-      - name: Validate setup script
+      - name: Validate PowerShell scripts
         shell: powershell
         run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path 'RestrictedShellSetup.ps1'),
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
-          if ($errors.Count) {
-            $errors | ForEach-Object { Write-Error $_.Message }
-            exit 1
+          $files = @((Resolve-Path 'RestrictedShellSetup.ps1'))
+          $files += Get-ChildItem scripts -Filter *.ps1 -File | ForEach-Object { $_.FullName }
+
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $file,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count) {
+              $errors | ForEach-Object { Write-Error "$file : $($_.Message)" }
+              exit 1
+            }
           }
+
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\InitializeAudioVolumes.ps1 -ValidateOnly
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Assemble package
         shell: pwsh
@@ -70,6 +78,7 @@ jobs:
           Copy-Item artifacts/RestrictedShell-x64/RestrictedShell.exe package/bin/x64/
           Copy-Item artifacts/RestrictedShell-arm64/RestrictedShell.exe package/bin/arm64/
           Copy-Item RestrictedShellSetup.ps1,RestrictedShell.ini,README.md package/
+          Copy-Item scripts package/scripts -Recurse
           Compress-Archive package/* RestrictedShell.zip
       - uses: actions/upload-artifact@v4
         with:
