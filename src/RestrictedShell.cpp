@@ -37,6 +37,7 @@ static WCHAR precmd[32768];
 static BOOL logoffOnExit=TRUE;
 static BOOL blockShellHotkeys=TRUE;
 static BOOL preventChildProcesses=FALSE;
+static BOOL standardKeyboardVolumeShortcuts=FALSE;
 static WCHAR inipath[MAX_PATH];
 static WCHAR username[256];
 
@@ -218,6 +219,13 @@ static LRESULT CALLBACK keyproc(int n,WPARAM w,LPARAM l)
         if(v==VK_VOLUME_UP){volume(.05f);return 1;}
         if(v==VK_VOLUME_DOWN){volume(-.05f);return 1;}
         if(v==VK_VOLUME_MUTE){outmute();return 1;}
+
+        if(standardKeyboardVolumeShortcuts&&win&&alt){
+            if(v==VK_OEM_PLUS){volume(.05f);return 1;}
+            if(v==VK_OEM_MINUS){volume(-.05f);return 1;}
+            if(v=='M'){outmute();return 1;}
+        }
+
         if(win&&alt&&v=='K'){micmute();return 1;}
         if(win&&v=='L'){LockWorkStation();return 1;}
 
@@ -460,6 +468,11 @@ extern "C" void WINAPI entry()
     WCHAR childValue[16];
     getconfig(L"PreventChildProcesses",L"0",childValue,16);
     preventChildProcesses = !(childValue[0]==L'0' && childValue[1]==0);
+
+    WCHAR volumeShortcutValue[16];
+    getconfig(L"StandardKeyboardVolumeShortcuts",L"0",volumeShortcutValue,16);
+    standardKeyboardVolumeShortcuts =
+        !(volumeShortcutValue[0]==L'0' && volumeShortcutValue[1]==0);
 
     WNDCLASSW a,b;
     memset(&a,0,sizeof(a));
