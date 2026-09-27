@@ -14,7 +14,10 @@ if (-not $IniPath) {
     $IniPath = Join-Path (Split-Path -Parent $scriptDirectory) 'RestrictedShell.ini'
 }
 
-if (-not ('RestrictedShell.AudioPreset' -as [type])) {
+# PowerShell 5.1 has no built-in Core Audio cmdlets. Keep the interop layer small:
+# enumerate render endpoints, identify their form factor/default roles, and set
+# an endpoint's master volume. The actual selection policy stays in PowerShell.
+if (-not ('RestrictedShell.AudioEndpoints' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -22,41 +25,27 @@ using System.Runtime.InteropServices;
 
 namespace RestrictedShell
 {
-    public enum EndpointFormFactor
+    public sealed class AudioEndpoint
     {
-        RemoteNetworkDevice = 0,
-        Speakers = 1,
-        LineLevel = 2,
-        Headphones = 3,
-        Microphone = 4,
-        Headset = 5,
-        Handset = 6,
-        UnknownDigitalPassthrough = 7,
-        SPDIF = 8,
-        DigitalAudioDisplayDevice = 9,
-        UnknownFormFactor = 10
+        public string Id;
+        public string Name;
+        public uint State;
+        public uint FormFactor;
+        public bool Active;
+        public bool Private;
+        public bool DefaultConsole;
+        public bool DefaultMultimedia;
+        public bool DefaultCommunications;
     }
 
-    enum EDataFlow
-    {
-        eRender = 0,
-        eCapture = 1,
-        eAll = 2
-    }
-
-    enum ERole
-    {
-        eConsole = 0,
-        eMultimedia = 1,
-        eCommunications = 2
-    }
+    enum EDataFlow { Render = 0 }
+    enum ERole { Console = 0, Multimedia = 1, Communications = 2 }
 
     [StructLayout(LayoutKind.Sequential)]
     struct PROPERTYKEY
     {
         public Guid fmtid;
         public uint pid;
-
         public PROPERTYKEY(string fmtid, uint pid)
         {
             this.fmtid = new Guid(fmtid);
@@ -72,181 +61,111 @@ namespace RestrictedShell
         [FieldOffset(8)] public uint uintValue;
     }
 
-    [ComImport]
-    [Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
-    class MMDeviceEnumeratorComObject
-    {
-    }
+    [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+    class MMDeviceEnumeratorComObject { }
 
-    [ComImport]
-    [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IMMDeviceEnumerator
     {
-        [PreserveSig]
-        int EnumAudioEndpoints(EDataFlow dataFlow, uint stateMask, out IMMDeviceCollection devices);
-
-        [PreserveSig]
-        int GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IMMDevice device);
-
-        [PreserveSig]
-        int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
-
-        [PreserveSig]
-        int RegisterEndpointNotificationCallback(IntPtr client);
-
-        [PreserveSig]
-        int UnregisterEndpointNotificationCallback(IntPtr client);
+        void EnumAudioEndpoints(EDataFlow flow, uint stateMask, out IMMDeviceCollection devices);
+        void GetDefaultAudioEndpoint(EDataFlow flow, ERole role, out IMMDevice device);
+        void GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
     }
 
-    [ComImport]
-    [Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IMMDeviceCollection
     {
-        [PreserveSig]
-        int GetCount(out uint count);
-
-        [PreserveSig]
-        int Item(uint index, out IMMDevice device);
+        void GetCount(out uint count);
+        void Item(uint index, out IMMDevice device);
     }
 
-    [ComImport]
-    [Guid("D666063F-1587-4E43-81F1-B948E807363F")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IMMDevice
     {
-        [PreserveSig]
-        int Activate(ref Guid iid, uint clsCtx, IntPtr activationParams,
-            [MarshalAs(UnmanagedType.IUnknown)] out object interfacePointer);
-
-        [PreserveSig]
-        int OpenPropertyStore(uint stgmAccess, out IPropertyStore properties);
-
-        [PreserveSig]
-        int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
-
-        [PreserveSig]
-        int GetState(out uint state);
+        void Activate(ref Guid iid, uint clsCtx, IntPtr activationParams,
+            [MarshalAs(UnmanagedType.IUnknown)] out object result);
+        void OpenPropertyStore(uint access, out IPropertyStore properties);
+        void GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
+        void GetState(out uint state);
     }
 
-    [ComImport]
-    [Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IPropertyStore
     {
-        [PreserveSig]
-        int GetCount(out uint count);
-
-        [PreserveSig]
-        int GetAt(uint index, out PROPERTYKEY key);
-
-        [PreserveSig]
-        int GetValue(ref PROPERTYKEY key, out PROPVARIANT value);
-
-        [PreserveSig]
-        int SetValue(ref PROPERTYKEY key, ref PROPVARIANT value);
-
-        [PreserveSig]
-        int Commit();
+        void GetCount(out uint count);
+        void GetAt(uint index, out PROPERTYKEY key);
+        void GetValue(ref PROPERTYKEY key, out PROPVARIANT value);
     }
 
-    [ComImport]
-    [Guid("5CDF2C82-841E-4546-9722-0CF74078229A")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IAudioEndpointVolume
     {
-        [PreserveSig]
-        int RegisterControlChangeNotify(IntPtr notify);
-
-        [PreserveSig]
-        int UnregisterControlChangeNotify(IntPtr notify);
-
-        [PreserveSig]
-        int GetChannelCount(out uint channelCount);
-
-        [PreserveSig]
-        int SetMasterVolumeLevel(float levelDb, IntPtr eventContext);
-
-        [PreserveSig]
-        int SetMasterVolumeLevelScalar(float level, IntPtr eventContext);
+        void RegisterControlChangeNotify(IntPtr notify);
+        void UnregisterControlChangeNotify(IntPtr notify);
+        void GetChannelCount(out uint channelCount);
+        void SetMasterVolumeLevel(float levelDb, IntPtr eventContext);
+        void SetMasterVolumeLevelScalar(float level, IntPtr eventContext);
     }
 
-    public static class AudioPreset
+    public static class AudioEndpoints
     {
-        const uint DEVICE_STATE_ACTIVE = 0x00000001;
-        const uint DEVICE_STATE_UNPLUGGED = 0x00000008;
-        const uint STGM_READ = 0;
-        const uint CLSCTX_ALL = 23;
+        const uint Active = 0x1;
+        const uint Unplugged = 0x8;
+        const uint Read = 0;
+        const uint ClsCtxAll = 23;
         const ushort VT_UI4 = 19;
         const ushort VT_LPWSTR = 31;
 
-        static readonly PROPERTYKEY PKEY_Device_FriendlyName =
+        static readonly PROPERTYKEY FriendlyName =
             new PROPERTYKEY("A45C254E-DF1C-4EFD-8020-67D146A850E0", 14);
-
-        static readonly PROPERTYKEY PKEY_AudioEndpoint_FormFactor =
+        static readonly PROPERTYKEY FormFactor =
             new PROPERTYKEY("1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E", 0);
-
-        static readonly Guid IID_IAudioEndpointVolume =
+        static readonly Guid EndpointVolumeIid =
             new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
 
         [DllImport("ole32.dll")]
         static extern int PropVariantClear(ref PROPVARIANT value);
 
-        sealed class Endpoint
+        static void Release(object value)
         {
-            public string Id;
-            public string Name;
-            public uint State;
-            public EndpointFormFactor FormFactor;
+            if (value != null && Marshal.IsComObject(value))
+                Marshal.ReleaseComObject(value);
         }
 
-        sealed class Defaults
-        {
-            public string Console;
-            public string Multimedia;
-            public string Communications;
-        }
-
-        static void ThrowIfFailed(int hr, string operation)
-        {
-            if (hr < 0)
-                throw new COMException(operation + " failed.", hr);
-        }
-
-        static string GetDefaultId(IMMDeviceEnumerator enumerator, ERole role)
+        static string DefaultId(IMMDeviceEnumerator e, ERole role)
         {
             IMMDevice device = null;
             try
             {
-                int hr = enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender, role, out device);
-                if (hr < 0 || device == null)
-                    return null;
-
+                e.GetDefaultAudioEndpoint(EDataFlow.Render, role, out device);
                 string id;
-                ThrowIfFailed(device.GetId(out id), "IMMDevice.GetId");
+                device.GetId(out id);
                 return id;
+            }
+            catch (COMException)
+            {
+                return null;
             }
             finally
             {
-                if (device != null)
-                    Marshal.ReleaseComObject(device);
+                Release(device);
             }
         }
 
-        static string GetStringProperty(IPropertyStore store, PROPERTYKEY key)
+        static string StringProperty(IPropertyStore store, PROPERTYKEY key)
         {
             PROPVARIANT value;
-            int hr = store.GetValue(ref key, out value);
-            if (hr < 0)
-                return null;
-
+            store.GetValue(ref key, out value);
             try
             {
-                if (value.vt != VT_LPWSTR || value.pointerValue == IntPtr.Zero)
-                    return null;
-
-                return Marshal.PtrToStringUni(value.pointerValue);
+                return value.vt == VT_LPWSTR && value.pointerValue != IntPtr.Zero
+                    ? Marshal.PtrToStringUni(value.pointerValue)
+                    : null;
             }
             finally
             {
@@ -254,13 +173,10 @@ namespace RestrictedShell
             }
         }
 
-        static uint GetUIntProperty(IPropertyStore store, PROPERTYKEY key, uint fallback)
+        static uint UIntProperty(IPropertyStore store, PROPERTYKEY key, uint fallback)
         {
             PROPVARIANT value;
-            int hr = store.GetValue(ref key, out value);
-            if (hr < 0)
-                return fallback;
-
+            store.GetValue(ref key, out value);
             try
             {
                 return value.vt == VT_UI4 ? value.uintValue : fallback;
@@ -271,287 +187,95 @@ namespace RestrictedShell
             }
         }
 
-        static List<Endpoint> Enumerate(IMMDeviceEnumerator enumerator)
-        {
-            IMMDeviceCollection collection = null;
-            List<Endpoint> result = new List<Endpoint>();
-
-            try
-            {
-                ThrowIfFailed(
-                    enumerator.EnumAudioEndpoints(
-                        EDataFlow.eRender,
-                        DEVICE_STATE_ACTIVE | DEVICE_STATE_UNPLUGGED,
-                        out collection),
-                    "EnumAudioEndpoints");
-
-                uint count;
-                ThrowIfFailed(collection.GetCount(out count), "IMMDeviceCollection.GetCount");
-
-                for (uint i = 0; i < count; i++)
-                {
-                    IMMDevice device = null;
-                    IPropertyStore store = null;
-                    try
-                    {
-                        ThrowIfFailed(collection.Item(i, out device), "IMMDeviceCollection.Item");
-
-                        string id;
-                        uint state;
-                        ThrowIfFailed(device.GetId(out id), "IMMDevice.GetId");
-                        ThrowIfFailed(device.GetState(out state), "IMMDevice.GetState");
-                        ThrowIfFailed(device.OpenPropertyStore(STGM_READ, out store), "IMMDevice.OpenPropertyStore");
-
-                        string name = GetStringProperty(store, PKEY_Device_FriendlyName);
-                        uint formFactor = GetUIntProperty(
-                            store,
-                            PKEY_AudioEndpoint_FormFactor,
-                            (uint)EndpointFormFactor.UnknownFormFactor);
-
-                        result.Add(new Endpoint
-                        {
-                            Id = id,
-                            Name = String.IsNullOrEmpty(name) ? id : name,
-                            State = state,
-                            FormFactor = (EndpointFormFactor)formFactor
-                        });
-                    }
-                    finally
-                    {
-                        if (store != null)
-                            Marshal.ReleaseComObject(store);
-                        if (device != null)
-                            Marshal.ReleaseComObject(device);
-                    }
-                }
-            }
-            finally
-            {
-                if (collection != null)
-                    Marshal.ReleaseComObject(collection);
-            }
-
-            return result;
-        }
-
-        static bool IsPrivate(Endpoint endpoint)
-        {
-            return endpoint.FormFactor == EndpointFormFactor.Headphones ||
-                   endpoint.FormFactor == EndpointFormFactor.Headset ||
-                   endpoint.FormFactor == EndpointFormFactor.Handset;
-        }
-
-        static bool SameId(string a, string b)
+        static bool Same(string a, string b)
         {
             return a != null && b != null &&
                 String.Equals(a, b, StringComparison.OrdinalIgnoreCase);
         }
 
-        static int DefaultBonus(Endpoint endpoint, Defaults defaults)
+        public static AudioEndpoint[] Enumerate()
         {
-            if (SameId(endpoint.Id, defaults.Multimedia)) return 3000;
-            if (SameId(endpoint.Id, defaults.Console)) return 2500;
-            if (SameId(endpoint.Id, defaults.Communications)) return 2000;
-            return 0;
-        }
-
-        static int StateBonus(Endpoint endpoint)
-        {
-            return (endpoint.State & DEVICE_STATE_ACTIVE) != 0 ? 1000 : 0;
-        }
-
-        static int PublicFormFactorBonus(Endpoint endpoint)
-        {
-            switch (endpoint.FormFactor)
-            {
-                case EndpointFormFactor.Speakers: return 600;
-                case EndpointFormFactor.LineLevel: return 500;
-                case EndpointFormFactor.DigitalAudioDisplayDevice: return 400;
-                case EndpointFormFactor.SPDIF: return 300;
-                case EndpointFormFactor.UnknownDigitalPassthrough: return 200;
-                case EndpointFormFactor.UnknownFormFactor: return 100;
-                default: return 0;
-            }
-        }
-
-        static int PrivateFormFactorBonus(Endpoint endpoint)
-        {
-            switch (endpoint.FormFactor)
-            {
-                case EndpointFormFactor.Headphones: return 300;
-                case EndpointFormFactor.Headset: return 250;
-                case EndpointFormFactor.Handset: return 200;
-                default: return 0;
-            }
-        }
-
-        static Endpoint ChoosePublic(List<Endpoint> endpoints, Defaults defaults)
-        {
-            Endpoint best = null;
-            int bestScore = Int32.MinValue;
-
-            foreach (Endpoint endpoint in endpoints)
-            {
-                if (IsPrivate(endpoint))
-                    continue;
-
-                int score = DefaultBonus(endpoint, defaults) +
-                    StateBonus(endpoint) + PublicFormFactorBonus(endpoint);
-
-                if (best == null || score > bestScore)
-                {
-                    best = endpoint;
-                    bestScore = score;
-                }
-            }
-
-            return best;
-        }
-
-        static Endpoint ChoosePrivate(List<Endpoint> endpoints, Defaults defaults, string excludedId)
-        {
-            Endpoint best = null;
-            int bestScore = Int32.MinValue;
-
-            foreach (Endpoint endpoint in endpoints)
-            {
-                if (!IsPrivate(endpoint) || SameId(endpoint.Id, excludedId))
-                    continue;
-
-                int score = DefaultBonus(endpoint, defaults) +
-                    StateBonus(endpoint) + PrivateFormFactorBonus(endpoint);
-
-                if (best == null || score > bestScore)
-                {
-                    best = endpoint;
-                    bestScore = score;
-                }
-            }
-
-            return best;
-        }
-
-        static Endpoint ChooseSafetyFallback(List<Endpoint> endpoints, Defaults defaults)
-        {
-            Endpoint best = null;
-            int bestScore = Int32.MinValue;
-
-            foreach (Endpoint endpoint in endpoints)
-            {
-                int score = DefaultBonus(endpoint, defaults) + StateBonus(endpoint);
-                if (best == null || score > bestScore)
-                {
-                    best = endpoint;
-                    bestScore = score;
-                }
-            }
-
-            return best;
-        }
-
-        static void SetVolume(IMMDeviceEnumerator enumerator, Endpoint endpoint, int percent)
-        {
-            IMMDevice device = null;
-            object activated = null;
+            IMMDeviceEnumerator e = null;
+            IMMDeviceCollection collection = null;
+            List<AudioEndpoint> result = new List<AudioEndpoint>();
 
             try
             {
-                ThrowIfFailed(enumerator.GetDevice(endpoint.Id, out device), "IMMDeviceEnumerator.GetDevice");
+                e = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+                string console = DefaultId(e, ERole.Console);
+                string multimedia = DefaultId(e, ERole.Multimedia);
+                string communications = DefaultId(e, ERole.Communications);
 
-                Guid iid = IID_IAudioEndpointVolume;
-                ThrowIfFailed(
-                    device.Activate(ref iid, CLSCTX_ALL, IntPtr.Zero, out activated),
-                    "IMMDevice.Activate(IAudioEndpointVolume)");
+                e.EnumAudioEndpoints(EDataFlow.Render, Active | Unplugged, out collection);
+                uint count;
+                collection.GetCount(out count);
 
-                IAudioEndpointVolume volume = (IAudioEndpointVolume)activated;
-                ThrowIfFailed(
-                    volume.SetMasterVolumeLevelScalar(percent / 100.0f, IntPtr.Zero),
-                    "SetMasterVolumeLevelScalar");
-            }
-            finally
-            {
-                if (activated != null && Marshal.IsComObject(activated))
-                    Marshal.ReleaseComObject(activated);
-                if (device != null)
-                    Marshal.ReleaseComObject(device);
-            }
-        }
-
-        static string Describe(Endpoint endpoint)
-        {
-            return endpoint.Name + " (" + endpoint.FormFactor.ToString() + ")";
-        }
-
-        public static string[] Apply(int publicVolume, int privateVolume)
-        {
-            if (publicVolume < 0 || publicVolume > 100)
-                throw new ArgumentOutOfRangeException("publicVolume");
-            if (privateVolume < 0 || privateVolume > 100)
-                throw new ArgumentOutOfRangeException("privateVolume");
-
-            IMMDeviceEnumerator enumerator = null;
-            List<string> messages = new List<string>();
-
-            try
-            {
-                enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
-
-                Defaults defaults = new Defaults
+                for (uint i = 0; i < count; i++)
                 {
-                    Console = GetDefaultId(enumerator, ERole.eConsole),
-                    Multimedia = GetDefaultId(enumerator, ERole.eMultimedia),
-                    Communications = GetDefaultId(enumerator, ERole.eCommunications)
-                };
-
-                List<Endpoint> endpoints = Enumerate(enumerator);
-                if (endpoints.Count == 0)
-                    throw new InvalidOperationException("No active or unplugged render endpoints were found.");
-
-                Endpoint publicEndpoint = ChoosePublic(endpoints, defaults);
-                bool usedSafetyFallback = false;
-
-                if (publicEndpoint == null)
-                {
-                    publicEndpoint = ChooseSafetyFallback(endpoints, defaults);
-                    usedSafetyFallback = true;
-                }
-
-                if (publicEndpoint == null)
-                    throw new InvalidOperationException("Could not identify a public audio fallback endpoint.");
-
-                SetVolume(enumerator, publicEndpoint, publicVolume);
-
-                if (usedSafetyFallback)
-                    messages.Add("No distinct public endpoint was identifiable; treating " +
-                        Describe(publicEndpoint) + " as public for safety.");
-
-                messages.Add("Public: " + Describe(publicEndpoint) + " -> " + publicVolume + "%");
-
-                Endpoint privateEndpoint = ChoosePrivate(endpoints, defaults, publicEndpoint.Id);
-                if (privateEndpoint != null)
-                {
+                    IMMDevice device = null;
+                    IPropertyStore properties = null;
                     try
                     {
-                        SetVolume(enumerator, privateEndpoint, privateVolume);
-                        messages.Add("Private: " + Describe(privateEndpoint) + " -> " + privateVolume + "%");
+                        collection.Item(i, out device);
+                        string id;
+                        uint state;
+                        device.GetId(out id);
+                        device.GetState(out state);
+                        device.OpenPropertyStore(Read, out properties);
+
+                        string name = StringProperty(properties, FriendlyName);
+                        uint form = UIntProperty(properties, FormFactor, 10);
+
+                        result.Add(new AudioEndpoint {
+                            Id = id,
+                            Name = String.IsNullOrEmpty(name) ? id : name,
+                            State = state,
+                            FormFactor = form,
+                            Active = (state & Active) != 0,
+                            Private = form == 3 || form == 5 || form == 6,
+                            DefaultConsole = Same(id, console),
+                            DefaultMultimedia = Same(id, multimedia),
+                            DefaultCommunications = Same(id, communications)
+                        });
                     }
-                    catch (Exception ex)
+                    finally
                     {
-                        messages.Add("Warning: could not preset private endpoint " +
-                            Describe(privateEndpoint) + ": " + ex.Message);
+                        Release(properties);
+                        Release(device);
                     }
-                }
-                else
-                {
-                    messages.Add("No distinct private headphone/headset endpoint was found.");
                 }
 
-                return messages.ToArray();
+                return result.ToArray();
             }
             finally
             {
-                if (enumerator != null)
-                    Marshal.ReleaseComObject(enumerator);
+                Release(collection);
+                Release(e);
+            }
+        }
+
+        public static void SetVolume(string id, int percent)
+        {
+            if (percent < 0 || percent > 100)
+                throw new ArgumentOutOfRangeException("percent");
+
+            IMMDeviceEnumerator e = null;
+            IMMDevice device = null;
+            object volumeObject = null;
+            try
+            {
+                e = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+                e.GetDevice(id, out device);
+                Guid iid = EndpointVolumeIid;
+                device.Activate(ref iid, ClsCtxAll, IntPtr.Zero, out volumeObject);
+                ((IAudioEndpointVolume)volumeObject).SetMasterVolumeLevelScalar(
+                    percent / 100.0f, IntPtr.Zero);
+            }
+            finally
+            {
+                Release(volumeObject);
+                Release(device);
+                Release(e);
             }
         }
     }
@@ -565,27 +289,21 @@ if ($ValidateOnly) {
 }
 
 function Read-IniSection {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$Name
-    )
+    param([string]$Path, [string]$Name)
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "INI file not found: $Path"
     }
 
     $values = @{}
-    $inSection = $false
+    $inside = $false
 
     foreach ($line in Get-Content -LiteralPath $Path) {
         $text = $line.Trim()
-
         if ($text -match '^\[(.+)\]$') {
-            $inSection = $matches[1] -eq $Name
-            continue
+            $inside = $matches[1] -eq $Name
         }
-
-        if ($inSection -and $text -match '^([^;#][^=]*)=(.*)$') {
+        elseif ($inside -and $text -match '^([^;#][^=]*)=(.*)$') {
             $values[$matches[1].Trim()] = $matches[2].Trim()
         }
     }
@@ -594,30 +312,123 @@ function Read-IniSection {
 }
 
 function Get-VolumeSetting {
-    param(
-        [Parameter(Mandatory = $true)]$Values,
-        [Parameter(Mandatory = $true)][string]$Name
-    )
-
-    if (-not $Values.ContainsKey($Name)) {
-        throw "Missing [$Section] $Name in $IniPath"
-    }
+    param($Values, [string]$Name)
 
     $value = 0
-    if (-not [int]::TryParse($Values[$Name], [ref]$value) -or $value -lt 0 -or $value -gt 100) {
+    if (-not $Values.ContainsKey($Name) -or
+        -not [int]::TryParse($Values[$Name], [ref]$value) -or
+        $value -lt 0 -or $value -gt 100) {
         throw "[$Section] $Name must be an integer from 0 to 100."
     }
-
     return $value
 }
 
-try {
-    $settings = Read-IniSection -Path $IniPath -Name $Section
-    $publicVolume = Get-VolumeSetting -Values $settings -Name 'PublicVolume'
-    $privateVolume = Get-VolumeSetting -Values $settings -Name 'PrivateVolume'
+$formFactorNames = @{
+    0 = 'RemoteNetworkDevice'
+    1 = 'Speakers'
+    2 = 'LineLevel'
+    3 = 'Headphones'
+    5 = 'Headset'
+    6 = 'Handset'
+    7 = 'UnknownDigitalPassthrough'
+    8 = 'SPDIF'
+    9 = 'DigitalAudioDisplayDevice'
+    10 = 'UnknownFormFactor'
+}
 
-    [RestrictedShell.AudioPreset]::Apply($publicVolume, $privateVolume) |
-        ForEach-Object { Write-Output $_ }
+function Get-EndpointScore {
+    param($Endpoint, [bool]$Private)
+
+    $score = 0
+    if ($Endpoint.DefaultMultimedia) { $score += 3000 }
+    elseif ($Endpoint.DefaultConsole) { $score += 2500 }
+    elseif ($Endpoint.DefaultCommunications) { $score += 2000 }
+    if ($Endpoint.Active) { $score += 1000 }
+
+    if ($Private) {
+        $score += switch ($Endpoint.FormFactor) {
+            3 { 300 }
+            5 { 250 }
+            6 { 200 }
+            default { 0 }
+        }
+    }
+    else {
+        $score += switch ($Endpoint.FormFactor) {
+            1 { 600 }
+            2 { 500 }
+            9 { 400 }
+            8 { 300 }
+            7 { 200 }
+            10 { 100 }
+            default { 0 }
+        }
+    }
+
+    return $score
+}
+
+function Select-BestEndpoint {
+    param($Endpoints, [bool]$Private)
+
+    $best = $null
+    $bestScore = [int]::MinValue
+    foreach ($endpoint in $Endpoints) {
+        $score = Get-EndpointScore $endpoint $Private
+        if ($null -eq $best -or $score -gt $bestScore) {
+            $best = $endpoint
+            $bestScore = $score
+        }
+    }
+    return $best
+}
+
+function Describe-Endpoint {
+    param($Endpoint)
+    $form = $formFactorNames[[int]$Endpoint.FormFactor]
+    if (-not $form) { $form = "FormFactor$($Endpoint.FormFactor)" }
+    return "$($Endpoint.Name) ($form)"
+}
+
+try {
+    $settings = Read-IniSection $IniPath $Section
+    $publicVolume = Get-VolumeSetting $settings 'PublicVolume'
+    $privateVolume = Get-VolumeSetting $settings 'PrivateVolume'
+    $endpoints = @([RestrictedShell.AudioEndpoints]::Enumerate())
+
+    if (-not $endpoints.Count) {
+        throw 'No active or unplugged render endpoints were found.'
+    }
+
+    $publicCandidates = @($endpoints | Where-Object { -not $_.Private })
+    $usedSafetyFallback = -not $publicCandidates.Count
+    if ($usedSafetyFallback) { $publicCandidates = $endpoints }
+
+    $public = Select-BestEndpoint $publicCandidates $false
+    [RestrictedShell.AudioEndpoints]::SetVolume($public.Id, $publicVolume)
+
+    if ($usedSafetyFallback) {
+        Write-Output "No distinct public endpoint was identifiable; treating $(Describe-Endpoint $public) as public for safety."
+    }
+    Write-Output "Public: $(Describe-Endpoint $public) -> $publicVolume%"
+
+    $privateCandidates = @($endpoints | Where-Object {
+        $_.Private -and $_.Id -ne $public.Id
+    })
+    $private = Select-BestEndpoint $privateCandidates $true
+
+    if ($private) {
+        try {
+            [RestrictedShell.AudioEndpoints]::SetVolume($private.Id, $privateVolume)
+            Write-Output "Private: $(Describe-Endpoint $private) -> $privateVolume%"
+        }
+        catch {
+            Write-Output "Warning: could not preset private endpoint $(Describe-Endpoint $private): $($_.Exception.Message)"
+        }
+    }
+    else {
+        Write-Output 'No distinct private headphone/headset endpoint was found.'
+    }
 
     exit 0
 }
