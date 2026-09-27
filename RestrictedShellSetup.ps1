@@ -400,9 +400,13 @@ function Get-UserWritablePrincipalSids {
 function Test-PathWritableByPrincipals {
     param([string]$Path, $PrincipalSids)
 
-    $writeMask = [Security.AccessControl.FileSystemRights]::Write -bor
-        [Security.AccessControl.FileSystemRights]::Modify -bor
-        [Security.AccessControl.FileSystemRights]::FullControl -bor
+    # Use only atomic mutation rights here. Composite values such as Modify or
+    # FullControl also contain read/execute bits, which would make a normal
+    # ReadAndExecute ACE appear writable when tested with a bit mask.
+    $writeMask = [Security.AccessControl.FileSystemRights]::WriteData -bor
+        [Security.AccessControl.FileSystemRights]::AppendData -bor
+        [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+        [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
         [Security.AccessControl.FileSystemRights]::Delete -bor
         [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
         [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
