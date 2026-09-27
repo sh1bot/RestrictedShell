@@ -64,7 +64,7 @@ namespace RestrictedShell
         }
     }
 
-    [StructLayout(LayoutKind.Explicit)]
+    [StructLayout(LayoutKind.Explicit, Size = 16)]
     struct PROPVARIANT
     {
         [FieldOffset(0)] public ushort vt;
