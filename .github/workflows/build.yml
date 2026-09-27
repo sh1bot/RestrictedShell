@@ -54,14 +54,26 @@ jobs:
           Copy-Item artifacts/RestrictedShell-x64/RestrictedShell.exe package/bin/x64/
           Copy-Item artifacts/RestrictedShell-arm64/RestrictedShell.exe package/bin/arm64/
           Copy-Item RestrictedShellSetup.ps1,RestrictedShell.ini,README.md package/
+          if (Test-Path RestrictedShellPicture.ps1) { Copy-Item RestrictedShellPicture.ps1 package/ }
           Compress-Archive package/* RestrictedShell.zip
       - uses: actions/upload-artifact@v4
         with:
           name: RestrictedShell-bundle
           path: RestrictedShell.zip
-      - name: Publish GitHub Release
+
+      - name: Publish versioned GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: RestrictedShell.zip
           generate_release_notes: true
+
+      - name: Publish moving latest build
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --repo "${{ github.repository }}" --cleanup-tag --yes 2>$null
+          if ($LASTEXITCODE -ne 0) { $global:LASTEXITCODE = 0 }
+          gh release create latest RestrictedShell.zip --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "Latest build" --notes "Automated build of the latest source on main. This prerelease is replaced on every successful main-branch build." --prerelease
