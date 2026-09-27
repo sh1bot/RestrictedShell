@@ -150,6 +150,7 @@ function Install-RestrictedShell {
 LogoffOnExit=1
 BlockShellHotkeys=1
 PreventChildProcesses=0
+StandardKeyboardVolumeShortcuts=0
 PreRunExecutable=
 PreRunArguments=
 "@
@@ -598,7 +599,7 @@ function Install-AccountPicture {
 $form = [Windows.Forms.Form]@{
     Text = 'Restricted Account Configurator'
     Width = 700
-    Height = 720
+    Height = 750
     StartPosition = 'CenterScreen'
     FormBorderStyle = 'FixedDialog'
     MaximizeBox = $false
@@ -676,28 +677,30 @@ $preventPasswordChange = [Windows.Forms.CheckBox]@{ Text = 'User cannot change p
 $passwordNeverExpires = [Windows.Forms.CheckBox]@{ Text = 'Password never expires'; Left = 160; Top = 400; Width = 250; Checked = $true }
 $blockShellHotkeys = [Windows.Forms.CheckBox]@{ Text = 'Block Windows shell/application-switching hotkeys'; Left = 160; Top = 430; Width = 370; Checked = $true }
 $preventChildProcesses = [Windows.Forms.CheckBox]@{ Text = 'Prevent target application from starting child processes'; Left = 160; Top = 460; Width = 390; Checked = $false }
-$logoffOnExit = [Windows.Forms.CheckBox]@{ Text = 'Log off when target application exits'; Left = 160; Top = 490; Width = 320; Checked = $true }
+$standardKeyboardVolumeShortcuts = [Windows.Forms.CheckBox]@{ Text = 'Enable Win+Alt volume shortcuts (= / - / M)'; Left = 160; Top = 490; Width = 390; Checked = $false }
+$logoffOnExit = [Windows.Forms.CheckBox]@{ Text = 'Log off when target application exits'; Left = 160; Top = 520; Width = 320; Checked = $true }
 $form.Controls.AddRange(@(
     $disableTaskManager,
     $preventPasswordChange,
     $passwordNeverExpires,
     $blockShellHotkeys,
     $preventChildProcesses,
+    $standardKeyboardVolumeShortcuts,
     $logoffOnExit
 ))
 
 $note = [Windows.Forms.Label]@{
     Left = 20
-    Top = 530
+    Top = 560
     Width = 640
     Height = 60
     Text = 'First sign into this account normally, configure and test the target application, then sign out. A pre-run program/script is unrestricted and must exit before the target starts.'
 }
 $form.Controls.Add($note)
 
-$status = [Windows.Forms.Label]@{ Left = 20; Top = 620; Width = 390; Height = 40; Text = 'Ready.' }
-$convertButton = [Windows.Forms.Button]@{ Text = 'Convert / Update'; Left = 420; Top = 615; Width = 115 }
-$revertButton = [Windows.Forms.Button]@{ Text = 'Revert Account'; Left = 545; Top = 615; Width = 115 }
+$status = [Windows.Forms.Label]@{ Left = 20; Top = 650; Width = 390; Height = 40; Text = 'Ready.' }
+$convertButton = [Windows.Forms.Button]@{ Text = 'Convert / Update'; Left = 420; Top = 645; Width = 115 }
+$revertButton = [Windows.Forms.Button]@{ Text = 'Revert Account'; Left = 545; Top = 645; Width = 115 }
 $form.Controls.AddRange(@($status, $convertButton, $revertButton))
 
 $executableDialog = [Windows.Forms.OpenFileDialog]@{ Filter = 'Executables|*.exe' }
@@ -758,6 +761,7 @@ function Refresh-AccountState {
     $preRunArgumentsTextBox.Text = ''
     $picturePathTextBox.Text = ''
     $preventChildProcesses.Checked = $false
+    $standardKeyboardVolumeShortcuts.Checked = $false
     $blockShellHotkeys.Checked = $true
     $logoffOnExit.Checked = $true
 
@@ -777,6 +781,7 @@ function Refresh-AccountState {
         $preRunTextBox.Text = $section.PreRunExecutable
         $preRunArgumentsTextBox.Text = $section.PreRunArguments
         $preventChildProcesses.Checked = Get-IniBoolean $section 'PreventChildProcesses' $false
+        $standardKeyboardVolumeShortcuts.Checked = Get-IniBoolean $section 'StandardKeyboardVolumeShortcuts' $false
         $blockShellHotkeys.Checked = Get-IniBoolean $section 'BlockShellHotkeys' $true
         $logoffOnExit.Checked = Get-IniBoolean $section 'LogoffOnExit' $true
     }
@@ -905,6 +910,7 @@ $convertButton.Add_Click({
         Set-IniValue $data $user.Name 'PreRunExecutable' $preRunTextBox.Text
         Set-IniValue $data $user.Name 'PreRunArguments' $preRunArgumentsTextBox.Text
         Set-IniValue $data $user.Name 'PreventChildProcesses' ([int]$preventChildProcesses.Checked)
+        Set-IniValue $data $user.Name 'StandardKeyboardVolumeShortcuts' ([int]$standardKeyboardVolumeShortcuts.Checked)
         Set-IniValue $data $user.Name 'LogoffOnExit' ([int]$logoffOnExit.Checked)
         Set-IniValue $data $user.Name 'BlockShellHotkeys' ([int]$blockShellHotkeys.Checked)
         Set-IniValue $data $metadataSection 'Converted' 1
