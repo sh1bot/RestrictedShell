@@ -27,6 +27,7 @@ extern "C" int _fltused=0;
 static HHOOK hk;
 static HANDLE child;
 static HWND mw,ow;
+static UINT shellHookMessage;
 static IMMDeviceEnumerator* de;
 static IAudioEndpointVolume *out,*mic;
 static WCHAR ot[32],ov[32];
@@ -88,6 +89,14 @@ static void workdir(const WCHAR*e,WCHAR*wd)
     for(WCHAR*q=wd;*q;q++)
         if(*q==L'\\'||*q==L'/')x=q;
     if(x)*x=0;else wd[0]=0;
+}
+
+static BOOL findexe(const WCHAR*preferred,const WCHAR*fallback,WCHAR*path)
+{
+    DWORD n=SearchPathW(0,preferred,0,MAX_PATH,path,0);
+    if(n&&n<MAX_PATH)return TRUE;
+    n=SearchPathW(0,fallback,0,MAX_PATH,path,0);
+    return n&&n<MAX_PATH;
 }
 
 static void show(const WCHAR*t,const WCHAR*v)
@@ -291,6 +300,15 @@ static LRESULT CALLBACK osdproc(HWND h,UINT m,WPARAM w,LPARAM l)
 
 static LRESULT CALLBACK msgproc(HWND h,UINT m,WPARAM w,LPARAM l)
 {
+    if(shellHookMessage&&m==shellHookMessage&&w==HSHELL_APPCOMMAND){
+        int cmd=GET_APPCOMMAND_LPARAM(l);
+        if(cmd==APPCOMMAND_MICROPHONE_VOLUME_MUTE||
+           cmd==APPCOMMAND_MIC_ON_OFF_TOGGLE){
+            micmute();
+            return TRUE;
+        }
+    }
+
     if(m==WM_TIMER&&w==T_PROCESS&&child&&
        WaitForSingleObject(child,0)==WAIT_OBJECT_0){
         KillTimer(h,T_PROCESS);
@@ -426,6 +444,19 @@ static BOOL prerun()
            (preargsbuf[0]&&(!ap(precmd,32768,L" ")||
                             !ap(precmd,32768,preargsbuf))))return FALSE;
         cmd=precmd;
+    } else if(endsi(pre,L".py")||endsi(pre,L".pyw")){
+        BOOL windowed=endsi(pre,L".pyw");
+        if(!findexe(windowed?L"pyw.exe":L"py.exe",
+                    windowed?L"pythonw.exe":L"python.exe",app))return FALSE;
+        precmd[0]=0;
+        if(!ap(precmd,32768,L"\"")||
+           !ap(precmd,32768,app)||
+           !ap(precmd,32768,L"\" \"")||
+           !ap(precmd,32768,pre)||
+           !ap(precmd,32768,L"\"")||
+           (preargsbuf[0]&&(!ap(precmd,32768,L" ")||
+                            !ap(precmd,32768,preargsbuf))))return FALSE;
+        cmd=precmd;
     }
 
     HANDLE p=0;
@@ -492,11 +523,14 @@ extern "C" void WINAPI entry()
     b.lpszClassName=L"RSO";
     RegisterClassW(&b);
 
-    mw=CreateWindowExW(0,L"RSM",L"",0,0,0,0,0,
-        HWND_MESSAGE,0,i,0);
+    mw=CreateWindowExW(WS_EX_TOOLWINDOW,L"RSM",L"",WS_POPUP,
+        0,0,0,0,0,0,i,0);
     ow=CreateWindowExW(
         WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,
         L"RSO",L"",WS_POPUP,0,0,360,104,0,0,i,0);
+
+    shellHookMessage=RegisterWindowMessageW(L"SHELLHOOK");
+    RegisterShellHookWindow(mw);
 
     audioinit();
 
