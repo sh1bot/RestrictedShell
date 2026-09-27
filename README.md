@@ -44,7 +44,9 @@ Administrator accounts are deliberately excluded from the list of accounts that 
 
 ## Running the configurator
 
-Run:
+You can first try right-clicking `RestrictedShellSetup.ps1` and choosing **Run with PowerShell**.
+
+Depending on Windows security settings or PowerShell execution policy, that may be blocked. In that case, open PowerShell in the extracted package directory and run:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\RestrictedShellSetup.ps1
