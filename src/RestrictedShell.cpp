@@ -1,550 +1,881 @@
 #define UNICODE
 #define _UNICODE
 #define WIN32_LEAN_AND_MEAN
+
 #include <windows.h>
-#include <mmdeviceapi.h>
 #include <endpointvolume.h>
-#pragma comment(lib,"advapi32.lib")
+#include <mmdeviceapi.h>
+
+#pragma comment(lib, "advapi32.lib")
 
 #ifndef PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY
 #define PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY ((DWORD_PTR)0x0002000E)
 #endif
+
 #ifndef PROCESS_CREATION_CHILD_PROCESS_RESTRICTED
 #define PROCESS_CREATION_CHILD_PROCESS_RESTRICTED 0x01
 #endif
 
+constexpr int kCommandBufferChars = 32768;
+constexpr int kOsdTextChars = 32;
+constexpr UINT_PTR kProcessTimerId = 1;
+constexpr UINT_PTR kOsdTimerId = 2;
+
 #pragma optimize("", off)
-extern "C" void* memset(void* dst, int value, size_t count)
-{
-    unsigned char* p=(unsigned char*)dst;
-    while(count--) *p++=(unsigned char)value;
-    return dst;
+extern "C" void* memset(void* dst, int value, size_t count) {
+  unsigned char* output = static_cast<unsigned char*>(dst);
+  while (count--) {
+    *output++ = static_cast<unsigned char>(value);
+  }
+  return dst;
 }
 #pragma optimize("", on)
 
-extern "C" int _fltused=0;
+extern "C" int _fltused = 0;
 
-static HHOOK hk;
-static HANDLE child;
-static HWND mw,ow;
-static UINT shellHookMessage;
-static BOOL shellHookRegistered=FALSE;
-static MINIMIZEDMETRICS originalMinimizedMetrics;
-static BOOL minimizedMetricsChanged=FALSE;
-static IMMDeviceEnumerator* de;
-static WCHAR ot[32],ov[32];
+static HHOOK keyboard_hook;
+static HANDLE child_process;
+static HWND message_window;
+static HWND osd_window;
+static UINT shell_hook_message;
+static BOOL shell_hook_registered = FALSE;
+static MINIMIZEDMETRICS original_minimized_metrics;
+static BOOL minimized_metrics_changed = FALSE;
+static IMMDeviceEnumerator* device_enumerator;
+static WCHAR osd_title[kOsdTextChars];
+static WCHAR osd_value[kOsdTextChars];
 
-static WCHAR argsbuf[32768];
-static WCHAR preargsbuf[32768];
-static WCHAR precmd[32768];
-static WCHAR cmdline[32768];
-static BOOL logoffOnExit=TRUE;
-static BOOL blockShellHotkeys=TRUE;
-static BOOL preventChildProcesses=FALSE;
-static BOOL standardKeyboardVolumeShortcuts=FALSE;
-static WCHAR inipath[MAX_PATH];
+static WCHAR target_arguments[kCommandBufferChars];
+static WCHAR pre_run_arguments[kCommandBufferChars];
+static WCHAR pre_run_command[kCommandBufferChars];
+static WCHAR command_line[kCommandBufferChars];
+static BOOL logoff_on_exit = TRUE;
+static BOOL block_shell_hotkeys = TRUE;
+static BOOL prevent_child_processes = FALSE;
+static BOOL standard_keyboard_volume_shortcuts = FALSE;
+static WCHAR ini_path[MAX_PATH];
 static WCHAR username[256];
 
-enum { T_PROCESS=1,T_OSD=2 };
-
-static BOOL dn(int k){return(GetAsyncKeyState(k)&0x8000)!=0;}
-
-static void cp(WCHAR*d,const WCHAR*s,int n)
-{
-    if(!n)return;
-    while(--n&&(*d++=*s++));
-    *d=0;
+static BOOL IsKeyDown(int virtual_key) {
+  return (GetAsyncKeyState(virtual_key) & 0x8000) != 0;
 }
 
-static BOOL ap(WCHAR*d,int n,const WCHAR*s)
-{
-    int i=0;
-    while(i<n&&d[i])i++;
-    if(i>=n)return FALSE;
-    while(*s){
-        if(i+1>=n)return FALSE;
-        d[i++]=*s++;
+static void CopyString(WCHAR* destination, const WCHAR* source, int capacity) {
+  if (!capacity) {
+    return;
+  }
+
+  while (--capacity && (*destination++ = *source++)) {
+  }
+  *destination = 0;
+}
+
+static BOOL AppendString(WCHAR* destination, int capacity,
+                         const WCHAR* source) {
+  int index = 0;
+  while (index < capacity && destination[index]) {
+    ++index;
+  }
+
+  if (index >= capacity) {
+    return FALSE;
+  }
+
+  while (*source) {
+    if (index + 1 >= capacity) {
+      return FALSE;
     }
-    d[i]=0;
-    return TRUE;
+    destination[index++] = *source++;
+  }
+
+  destination[index] = 0;
+  return TRUE;
 }
 
-static WCHAR lc(WCHAR c)
-{
-    return(c>=L'A'&&c<=L'Z')?(WCHAR)(c+(L'a'-L'A')):c;
+static WCHAR ToLowerAscii(WCHAR value) {
+  if (value >= L'A' && value <= L'Z') {
+    return static_cast<WCHAR>(value + (L'a' - L'A'));
+  }
+  return value;
 }
 
-static BOOL endsi(const WCHAR*s,const WCHAR*t)
-{
-    int a=0,b=0;
-    while(s[a])a++;
-    while(t[b])b++;
-    if(b>a)return FALSE;
-    for(int i=0;i<b;i++)
-        if(lc(s[a-b+i])!=lc(t[i]))return FALSE;
-    return TRUE;
-}
+static BOOL EndsWithCaseInsensitive(const WCHAR* value, const WCHAR* suffix) {
+  int value_length = 0;
+  int suffix_length = 0;
 
-static void workdir(const WCHAR*e,WCHAR*wd)
-{
-    cp(wd,e,MAX_PATH);
-    WCHAR*x=0;
-    for(WCHAR*q=wd;*q;q++)
-        if(*q==L'\\'||*q==L'/')x=q;
-    if(x)*x=0;else wd[0]=0;
-}
+  while (value[value_length]) {
+    ++value_length;
+  }
+  while (suffix[suffix_length]) {
+    ++suffix_length;
+  }
 
-static BOOL systemexe(const WCHAR*relative,WCHAR*path)
-{
-    DWORD n=GetWindowsDirectoryW(path,MAX_PATH);
-    if(!n||n>=MAX_PATH)return FALSE;
-    return ap(path,MAX_PATH,relative);
-}
+  if (suffix_length > value_length) {
+    return FALSE;
+  }
 
-static BOOL makecmd(const WCHAR*app,const WCHAR*args)
-{
-    cmdline[0]=0;
-    if(!ap(cmdline,32768,L"\"")||
-       !ap(cmdline,32768,app)||
-       !ap(cmdline,32768,L"\""))return FALSE;
-    if(args&&args[0]){
-        if(!ap(cmdline,32768,L" ")||!ap(cmdline,32768,args))return FALSE;
+  for (int i = 0; i < suffix_length; ++i) {
+    if (ToLowerAscii(value[value_length - suffix_length + i]) !=
+        ToLowerAscii(suffix[i])) {
+      return FALSE;
     }
-    return TRUE;
+  }
+
+  return TRUE;
 }
 
-static void show(const WCHAR*t,const WCHAR*v)
-{
-    cp(ot,t,32);cp(ov,v,32);
-    RECT r;
-    SystemParametersInfoW(SPI_GETWORKAREA,0,&r,0);
-    SetWindowPos(ow,HWND_TOPMOST,
-        r.left+(r.right-r.left-360)/2,
-        r.top+(r.bottom-r.top-104)/2,
-        360,104,SWP_NOACTIVATE|SWP_SHOWWINDOW);
-    InvalidateRect(ow,0,TRUE);
-    UpdateWindow(ow);
-    KillTimer(ow,T_OSD);
-    SetTimer(ow,T_OSD,1200,0);
-}
+static void GetWorkingDirectory(const WCHAR* executable, WCHAR* directory) {
+  CopyString(directory, executable, MAX_PATH);
 
-static void pct(int v,WCHAR*b)
-{
-    WCHAR q[8],r[8];
-    int i=0,j=0;
-    if(!v)q[j++]=L'0';
-    else{
-        while(v){r[i++]=(WCHAR)(L'0'+v%10);v/=10;}
-        while(i)q[j++]=r[--i];
+  WCHAR* last_separator = nullptr;
+  for (WCHAR* cursor = directory; *cursor; ++cursor) {
+    if (*cursor == L'\\' || *cursor == L'/') {
+      last_separator = cursor;
     }
-    q[j++]=L'%';q[j]=0;cp(b,q,32);
+  }
+
+  if (last_separator) {
+    *last_separator = 0;
+  } else {
+    directory[0] = 0;
+  }
 }
 
-static IAudioEndpointVolume* endpoint(EDataFlow flow,ERole role)
-{
-    if(!de)return 0;
-    IMMDevice*d=0;
-    IAudioEndpointVolume*v=0;
-    if(SUCCEEDED(de->GetDefaultAudioEndpoint(flow,role,&d))){
-        d->Activate(__uuidof(IAudioEndpointVolume),
-            CLSCTX_INPROC_SERVER,0,(void**)&v);
-        d->Release();
+static BOOL GetSystemExecutable(const WCHAR* relative_path, WCHAR* path) {
+  DWORD length = GetWindowsDirectoryW(path, MAX_PATH);
+  if (!length || length >= MAX_PATH) {
+    return FALSE;
+  }
+  return AppendString(path, MAX_PATH, relative_path);
+}
+
+static BOOL BuildCommandLine(const WCHAR* executable, const WCHAR* arguments) {
+  command_line[0] = 0;
+
+  if (!AppendString(command_line, kCommandBufferChars, L"\"") ||
+      !AppendString(command_line, kCommandBufferChars, executable) ||
+      !AppendString(command_line, kCommandBufferChars, L"\"")) {
+    return FALSE;
+  }
+
+  if (arguments && arguments[0]) {
+    if (!AppendString(command_line, kCommandBufferChars, L" ") ||
+        !AppendString(command_line, kCommandBufferChars, arguments)) {
+      return FALSE;
     }
-    return v;
+  }
+
+  return TRUE;
 }
 
-static void showvol(IAudioEndpointVolume*v)
-{
-    if(!v){show(L"Volume",L"ERROR");return;}
-    BOOL m=FALSE;float f=0;
-    if(FAILED(v->GetMute(&m))||FAILED(v->GetMasterVolumeLevelScalar(&f))){
-        show(L"Volume",L"ERROR");return;
+static void ShowOsd(const WCHAR* title, const WCHAR* value) {
+  CopyString(osd_title, title, kOsdTextChars);
+  CopyString(osd_value, value, kOsdTextChars);
+
+  RECT work_area;
+  SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0);
+  SetWindowPos(osd_window, HWND_TOPMOST,
+               work_area.left + (work_area.right - work_area.left - 360) / 2,
+               work_area.top + (work_area.bottom - work_area.top - 104) / 2,
+               360, 104, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+  InvalidateRect(osd_window, nullptr, TRUE);
+  UpdateWindow(osd_window);
+  KillTimer(osd_window, kOsdTimerId);
+  SetTimer(osd_window, kOsdTimerId, 1200, nullptr);
+}
+
+static void FormatPercent(int value, WCHAR* output) {
+  WCHAR digits[8];
+  WCHAR reversed[8];
+  int reversed_length = 0;
+  int output_length = 0;
+
+  if (!value) {
+    digits[output_length++] = L'0';
+  } else {
+    while (value) {
+      reversed[reversed_length++] =
+          static_cast<WCHAR>(L'0' + value % 10);
+      value /= 10;
     }
-    if(m)show(L"Volume",L"MUTED");
-    else{
-        WCHAR b[32];
-        pct((int)(f*100.0f+0.5f),b);
-        show(L"Volume",b);
+    while (reversed_length) {
+      digits[output_length++] = reversed[--reversed_length];
     }
+  }
+
+  digits[output_length++] = L'%';
+  digits[output_length] = 0;
+  CopyString(output, digits, kOsdTextChars);
 }
 
-static void volume(float delta)
-{
-    IAudioEndpointVolume*v=endpoint(eRender,eMultimedia);
-    if(v){
-        float f;
-        if(SUCCEEDED(v->GetMasterVolumeLevelScalar(&f))){
-            f+=delta;
-            if(f<0)f=0;
-            if(f>1)f=1;
-            v->SetMasterVolumeLevelScalar(f,0);
-        }
+static IAudioEndpointVolume* GetDefaultEndpointVolume(EDataFlow flow,
+                                                       ERole role) {
+  if (!device_enumerator) {
+    return nullptr;
+  }
+
+  IMMDevice* device = nullptr;
+  IAudioEndpointVolume* volume = nullptr;
+
+  if (SUCCEEDED(
+          device_enumerator->GetDefaultAudioEndpoint(flow, role, &device))) {
+    device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_INPROC_SERVER,
+                     nullptr, reinterpret_cast<void**>(&volume));
+    device->Release();
+  }
+
+  return volume;
+}
+
+static void ShowOutputVolume(IAudioEndpointVolume* volume) {
+  if (!volume) {
+    ShowOsd(L"Volume", L"ERROR");
+    return;
+  }
+
+  BOOL muted = FALSE;
+  float level = 0;
+  if (FAILED(volume->GetMute(&muted)) ||
+      FAILED(volume->GetMasterVolumeLevelScalar(&level))) {
+    ShowOsd(L"Volume", L"ERROR");
+    return;
+  }
+
+  if (muted) {
+    ShowOsd(L"Volume", L"MUTED");
+    return;
+  }
+
+  WCHAR percent[kOsdTextChars];
+  FormatPercent(static_cast<int>(level * 100.0f + 0.5f), percent);
+  ShowOsd(L"Volume", percent);
+}
+
+static void AdjustOutputVolume(float delta) {
+  IAudioEndpointVolume* volume =
+      GetDefaultEndpointVolume(eRender, eMultimedia);
+
+  if (volume) {
+    float level;
+    if (SUCCEEDED(volume->GetMasterVolumeLevelScalar(&level))) {
+      level += delta;
+      if (level < 0) {
+        level = 0;
+      }
+      if (level > 1) {
+        level = 1;
+      }
+      volume->SetMasterVolumeLevelScalar(level, nullptr);
     }
-    showvol(v);
-    if(v)v->Release();
+  }
+
+  ShowOutputVolume(volume);
+  if (volume) {
+    volume->Release();
+  }
 }
 
-static void outmute()
-{
-    IAudioEndpointVolume*v=endpoint(eRender,eMultimedia);
-    if(v){
-        BOOL m;
-        if(SUCCEEDED(v->GetMute(&m)))v->SetMute(!m,0);
+static void ToggleOutputMute() {
+  IAudioEndpointVolume* volume =
+      GetDefaultEndpointVolume(eRender, eMultimedia);
+
+  if (volume) {
+    BOOL muted;
+    if (SUCCEEDED(volume->GetMute(&muted))) {
+      volume->SetMute(!muted, nullptr);
     }
-    showvol(v);
-    if(v)v->Release();
+  }
+
+  ShowOutputVolume(volume);
+  if (volume) {
+    volume->Release();
+  }
 }
 
-static void micmute()
-{
-    IAudioEndpointVolume*v=endpoint(eCapture,eCommunications);
-    if(!v){show(L"Microphone",L"ERROR");return;}
-    BOOL m=FALSE;
-    if(FAILED(v->GetMute(&m))||FAILED(v->SetMute(!m,0))||FAILED(v->GetMute(&m)))
-        show(L"Microphone",L"ERROR");
-    else
-        show(L"Microphone",m?L"MUTED":L"ON");
-    v->Release();
+static void ToggleMicrophoneMute() {
+  IAudioEndpointVolume* volume =
+      GetDefaultEndpointVolume(eCapture, eCommunications);
+  if (!volume) {
+    ShowOsd(L"Microphone", L"ERROR");
+    return;
+  }
+
+  BOOL muted = FALSE;
+  if (FAILED(volume->GetMute(&muted)) ||
+      FAILED(volume->SetMute(!muted, nullptr)) ||
+      FAILED(volume->GetMute(&muted))) {
+    ShowOsd(L"Microphone", L"ERROR");
+  } else {
+    ShowOsd(L"Microphone", muted ? L"MUTED" : L"ON");
+  }
+
+  volume->Release();
 }
 
-static void audioinit()
-{
-    CoCreateInstance(__uuidof(MMDeviceEnumerator),0,CLSCTX_INPROC_SERVER,
-        IID_PPV_ARGS(&de));
+static void InitializeAudio() {
+  CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+                   CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&device_enumerator));
 }
 
-static LRESULT CALLBACK keyproc(int n,WPARAM w,LPARAM l)
-{
-    if(n<0)return CallNextHookEx(hk,n,w,l);
+static LRESULT CALLBACK KeyboardHookProc(int code, WPARAM wparam,
+                                         LPARAM lparam) {
+  if (code < 0) {
+    return CallNextHookEx(keyboard_hook, code, wparam, lparam);
+  }
 
-    KBDLLHOOKSTRUCT*k=(KBDLLHOOKSTRUCT*)l;
-    BOOL down=w==WM_KEYDOWN||w==WM_SYSKEYDOWN;
-    BOOL up=w==WM_KEYUP||w==WM_SYSKEYUP;
-    if(!down&&!up)return CallNextHookEx(hk,n,w,l);
+  auto* key = reinterpret_cast<KBDLLHOOKSTRUCT*>(lparam);
+  BOOL key_down = wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN;
+  BOOL key_up = wparam == WM_KEYUP || wparam == WM_SYSKEYUP;
+  if (!key_down && !key_up) {
+    return CallNextHookEx(keyboard_hook, code, wparam, lparam);
+  }
 
-    DWORD v=k->vkCode;
-    BOOL win=dn(VK_LWIN)||dn(VK_RWIN)||v==VK_LWIN||v==VK_RWIN;
-    BOOL alt=dn(VK_LMENU)||dn(VK_RMENU);
-    BOOL ctl=dn(VK_LCONTROL)||dn(VK_RCONTROL);
-    BOOL sh=dn(VK_LSHIFT)||dn(VK_RSHIFT);
+  DWORD virtual_key = key->vkCode;
+  BOOL windows_key = IsKeyDown(VK_LWIN) || IsKeyDown(VK_RWIN) ||
+                     virtual_key == VK_LWIN || virtual_key == VK_RWIN;
+  BOOL alt_key = IsKeyDown(VK_LMENU) || IsKeyDown(VK_RMENU);
+  BOOL control_key = IsKeyDown(VK_LCONTROL) || IsKeyDown(VK_RCONTROL);
+  BOOL shift_key = IsKeyDown(VK_LSHIFT) || IsKeyDown(VK_RSHIFT);
 
-    if(down){
-        if(v==VK_VOLUME_UP){volume(.05f);return 1;}
-        if(v==VK_VOLUME_DOWN){volume(-.05f);return 1;}
-        if(v==VK_VOLUME_MUTE){outmute();return 1;}
-
-        if(standardKeyboardVolumeShortcuts&&win&&alt){
-            if(v==VK_OEM_PLUS){volume(.05f);return 1;}
-            if(v==VK_OEM_MINUS){volume(-.05f);return 1;}
-            if(v=='M'){outmute();return 1;}
-        }
-
-        if(win&&alt&&v=='K'){micmute();return 1;}
-        if(win&&v=='L'){LockWorkStation();return 1;}
-
-        if(blockShellHotkeys){
-            if(alt&&(v==VK_TAB||v==VK_ESCAPE))return 1;
-            if(ctl&&sh&&v==VK_ESCAPE)return 1;
-            if(ctl&&v==VK_ESCAPE)return 1;
-        }
+  if (key_down) {
+    if (virtual_key == VK_VOLUME_UP) {
+      AdjustOutputVolume(0.05f);
+      return 1;
     }
-
-    // Once the explicitly allowed Win-key chords above have been handled,
-    // consume every other Win-key chord rather than trying to maintain a
-    // fragile blacklist of Windows shell shortcuts.
-    if(blockShellHotkeys&&win)return 1;
-    return CallNextHookEx(hk,n,w,l);
-}
-
-static void restoreshellmetrics()
-{
-    if(minimizedMetricsChanged){
-        SystemParametersInfoW(SPI_SETMINIMIZEDMETRICS,
-            sizeof(originalMinimizedMetrics),&originalMinimizedMetrics,0);
-        minimizedMetricsChanged=FALSE;
+    if (virtual_key == VK_VOLUME_DOWN) {
+      AdjustOutputVolume(-0.05f);
+      return 1;
     }
-}
-
-static void enableshellhook()
-{
-    MINIMIZEDMETRICS mm;
-    memset(&mm,0,sizeof(mm));
-    mm.cbSize=sizeof(mm);
-    memset(&originalMinimizedMetrics,0,sizeof(originalMinimizedMetrics));
-    originalMinimizedMetrics.cbSize=sizeof(originalMinimizedMetrics);
-
-    if(SystemParametersInfoW(SPI_GETMINIMIZEDMETRICS,sizeof(mm),&mm,0)){
-        originalMinimizedMetrics=mm;
-        mm.iArrange|=ARW_HIDE;
-        minimizedMetricsChanged=SystemParametersInfoW(
-            SPI_SETMINIMIZEDMETRICS,sizeof(mm),&mm,0);
+    if (virtual_key == VK_VOLUME_MUTE) {
+      ToggleOutputMute();
+      return 1;
     }
 
-    shellHookMessage=RegisterWindowMessageW(L"SHELLHOOK");
-    shellHookRegistered=RegisterShellHookWindow(mw);
-}
-
-static LRESULT CALLBACK osdproc(HWND h,UINT m,WPARAM w,LPARAM l)
-{
-    if(m==WM_TIMER&&w==T_OSD){
-        KillTimer(h,T_OSD);
-        ShowWindow(h,SW_HIDE);
-        return 0;
-    }
-    if(m==WM_ERASEBKGND){
-        RECT r;GetClientRect(h,&r);
-        HBRUSH b=CreateSolidBrush(RGB(24,24,24));
-        FillRect((HDC)w,&r,b);DeleteObject(b);
+    if (standard_keyboard_volume_shortcuts && windows_key && alt_key) {
+      if (virtual_key == VK_OEM_PLUS) {
+        AdjustOutputVolume(0.05f);
         return 1;
+      }
+      if (virtual_key == VK_OEM_MINUS) {
+        AdjustOutputVolume(-0.05f);
+        return 1;
+      }
+      if (virtual_key == 'M') {
+        ToggleOutputMute();
+        return 1;
+      }
     }
-    if(m==WM_PAINT){
-        PAINTSTRUCT p;HDC d=BeginPaint(h,&p);
-        RECT r;GetClientRect(h,&r);
-        SetBkMode(d,TRANSPARENT);SetTextColor(d,RGB(255,255,255));
-        HFONT a=CreateFontW(-21,0,0,0,FW_NORMAL,0,0,0,
-            DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");
-        HFONT b=CreateFontW(-29,0,0,0,FW_BOLD,0,0,0,
-            DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");
-        HGDIOBJ old=SelectObject(d,a);
-        RECT q=r;q.bottom=44;
-        DrawTextW(d,ot,-1,&q,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
-        SelectObject(d,b);q=r;q.top=38;
-        DrawTextW(d,ov,-1,&q,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
-        SelectObject(d,old);DeleteObject(a);DeleteObject(b);
-        EndPaint(h,&p);return 0;
+
+    if (windows_key && alt_key && virtual_key == 'K') {
+      ToggleMicrophoneMute();
+      return 1;
     }
-    return DefWindowProcW(h,m,w,l);
+
+    if (windows_key && virtual_key == 'L') {
+      LockWorkStation();
+      return 1;
+    }
+
+    if (block_shell_hotkeys) {
+      if (alt_key && (virtual_key == VK_TAB || virtual_key == VK_ESCAPE)) {
+        return 1;
+      }
+      if (control_key && shift_key && virtual_key == VK_ESCAPE) {
+        return 1;
+      }
+      if (control_key && virtual_key == VK_ESCAPE) {
+        return 1;
+      }
+    }
+  }
+
+  // Once the explicitly allowed Windows-key chords above have been handled,
+  // consume every other Windows-key chord rather than maintaining a fragile
+  // blacklist of shell shortcuts.
+  if (block_shell_hotkeys && windows_key) {
+    return 1;
+  }
+
+  return CallNextHookEx(keyboard_hook, code, wparam, lparam);
 }
 
-static LRESULT CALLBACK msgproc(HWND h,UINT m,WPARAM w,LPARAM l)
-{
-    if(shellHookMessage&&m==shellHookMessage&&w==HSHELL_APPCOMMAND){
-        int cmd=GET_APPCOMMAND_LPARAM(l);
-        if(cmd==APPCOMMAND_MICROPHONE_VOLUME_MUTE||
-           cmd==APPCOMMAND_MIC_ON_OFF_TOGGLE){
-            micmute();return TRUE;
-        }
-    }
-    if(m==WM_ENDSESSION&&w){restoreshellmetrics();return 0;}
-    if(m==WM_TIMER&&w==T_PROCESS&&child&&
-       WaitForSingleObject(child,0)==WAIT_OBJECT_0){
-        KillTimer(h,T_PROCESS);
-        CloseHandle(child);child=0;
-        if(logoffOnExit){
-            if(!ExitWindowsEx(EWX_LOGOFF,0)){
-                MessageBoxW(0,L"Target exited, but logoff failed.",
-                    L"Restricted Shell",MB_ICONERROR);
-                PostQuitMessage(1);
-            }
-        }else PostQuitMessage(0);
-        return 0;
-    }
-    return DefWindowProcW(h,m,w,l);
+static void RestoreShellMetrics() {
+  if (!minimized_metrics_changed) {
+    return;
+  }
+
+  SystemParametersInfoW(SPI_SETMINIMIZEDMETRICS,
+                        sizeof(original_minimized_metrics),
+                        &original_minimized_metrics, 0);
+  minimized_metrics_changed = FALSE;
 }
 
-static void pumpmessages()
-{
-    MSG m;
-    while(PeekMessageW(&m,0,0,0,PM_REMOVE)){
-        if(m.message==WM_QUIT)continue;
-        TranslateMessage(&m);DispatchMessageW(&m);
+static void EnableShellHook() {
+  MINIMIZEDMETRICS metrics;
+  memset(&metrics, 0, sizeof(metrics));
+  metrics.cbSize = sizeof(metrics);
+
+  memset(&original_minimized_metrics, 0, sizeof(original_minimized_metrics));
+  original_minimized_metrics.cbSize = sizeof(original_minimized_metrics);
+
+  if (SystemParametersInfoW(SPI_GETMINIMIZEDMETRICS, sizeof(metrics), &metrics,
+                            0)) {
+    original_minimized_metrics = metrics;
+    metrics.iArrange |= ARW_HIDE;
+    minimized_metrics_changed = SystemParametersInfoW(
+        SPI_SETMINIMIZEDMETRICS, sizeof(metrics), &metrics, 0);
+  }
+
+  shell_hook_message = RegisterWindowMessageW(L"SHELLHOOK");
+  shell_hook_registered = RegisterShellHookWindow(message_window);
+}
+
+static LRESULT CALLBACK OsdWindowProc(HWND hwnd, UINT message, WPARAM wparam,
+                                      LPARAM lparam) {
+  if (message == WM_TIMER && wparam == kOsdTimerId) {
+    KillTimer(hwnd, kOsdTimerId);
+    ShowWindow(hwnd, SW_HIDE);
+    return 0;
+  }
+
+  if (message == WM_ERASEBKGND) {
+    RECT client_rect;
+    GetClientRect(hwnd, &client_rect);
+
+    HBRUSH brush = CreateSolidBrush(RGB(24, 24, 24));
+    FillRect(reinterpret_cast<HDC>(wparam), &client_rect, brush);
+    DeleteObject(brush);
+    return 1;
+  }
+
+  if (message == WM_PAINT) {
+    PAINTSTRUCT paint;
+    HDC device_context = BeginPaint(hwnd, &paint);
+
+    RECT client_rect;
+    GetClientRect(hwnd, &client_rect);
+    SetBkMode(device_context, TRANSPARENT);
+    SetTextColor(device_context, RGB(255, 255, 255));
+
+    HFONT title_font = CreateFontW(
+        -21, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
+        CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    HFONT value_font = CreateFontW(
+        -29, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
+        CLEARTYPE_QUALITY, 0, L"Segoe UI");
+
+    HGDIOBJ old_font = SelectObject(device_context, title_font);
+
+    RECT text_rect = client_rect;
+    text_rect.bottom = 44;
+    DrawTextW(device_context, osd_title, -1, &text_rect,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    SelectObject(device_context, value_font);
+    text_rect = client_rect;
+    text_rect.top = 38;
+    DrawTextW(device_context, osd_value, -1, &text_rect,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    SelectObject(device_context, old_font);
+    DeleteObject(title_font);
+    DeleteObject(value_font);
+    EndPaint(hwnd, &paint);
+    return 0;
+  }
+
+  return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+static LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message,
+                                          WPARAM wparam, LPARAM lparam) {
+  if (shell_hook_message && message == shell_hook_message &&
+      wparam == HSHELL_APPCOMMAND) {
+    int command = GET_APPCOMMAND_LPARAM(lparam);
+    if (command == APPCOMMAND_MICROPHONE_VOLUME_MUTE ||
+        command == APPCOMMAND_MIC_ON_OFF_TOGGLE) {
+      ToggleMicrophoneMute();
+      return TRUE;
     }
-}
+  }
 
-static BOOL waitexit(HANDLE p,DWORD*exitCode)
-{
-    for(;;){
-        DWORD r=MsgWaitForMultipleObjects(1,&p,FALSE,INFINITE,QS_ALLINPUT);
-        if(r==WAIT_OBJECT_0)break;
-        if(r==WAIT_OBJECT_0+1){pumpmessages();continue;}
-        return FALSE;
+  if (message == WM_ENDSESSION && wparam) {
+    RestoreShellMetrics();
+    return 0;
+  }
+
+  if (message == WM_TIMER && wparam == kProcessTimerId && child_process &&
+      WaitForSingleObject(child_process, 0) == WAIT_OBJECT_0) {
+    KillTimer(hwnd, kProcessTimerId);
+    CloseHandle(child_process);
+    child_process = nullptr;
+
+    if (logoff_on_exit) {
+      if (!ExitWindowsEx(EWX_LOGOFF, 0)) {
+        MessageBoxW(nullptr, L"Target exited, but logoff failed.",
+                    L"Restricted Shell", MB_ICONERROR);
+        PostQuitMessage(1);
+      }
+    } else {
+      PostQuitMessage(0);
     }
-    return GetExitCodeProcess(p,exitCode);
+    return 0;
+  }
+
+  return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
-static void makeinipath()
-{
-    DWORD n=GetModuleFileNameW(0,inipath,MAX_PATH);
-    if(!n||n>=MAX_PATH){inipath[0]=0;return;}
-    WCHAR*slash=0;
-    for(WCHAR*p=inipath;*p;p++)if(*p==L'\\'||*p==L'/')slash=p;
-    if(slash)cp(slash+1,L"RestrictedShell.ini",
-        MAX_PATH-(int)(slash+1-inipath));
-    else cp(inipath,L"RestrictedShell.ini",MAX_PATH);
-}
-
-static void getconfig(const WCHAR*key,const WCHAR*fallback,
-    WCHAR*outbuf,DWORD outchars)
-{
-    static WCHAR base[32768];
-    base[0]=0;
-    GetPrivateProfileStringW(L"RestrictedShell",key,fallback,
-        base,32768,inipath);
-    if(username[0])
-        GetPrivateProfileStringW(username,key,base,outbuf,outchars,inipath);
-    else cp(outbuf,base,(int)outchars);
-}
-
-static BOOL startproc(const WCHAR*app,const WCHAR*args,const WCHAR*wd,
-    BOOL restrictChildren,HANDLE*outProcess)
-{
-    if(!makecmd(app,args))return FALSE;
-
-    PROCESS_INFORMATION p;memset(&p,0,sizeof(p));
-    BOOL ok=FALSE;
-    if(!restrictChildren){
-        STARTUPINFOW s;memset(&s,0,sizeof(s));s.cb=sizeof(s);
-        ok=CreateProcessW(app,cmdline,0,0,FALSE,0,0,
-            wd&&wd[0]?wd:0,&s,&p);
-    }else{
-        SIZE_T bytes=0;
-        InitializeProcThreadAttributeList(0,1,0,&bytes);
-        if(!bytes)return FALSE;
-        LPPROC_THREAD_ATTRIBUTE_LIST attrs=(LPPROC_THREAD_ATTRIBUTE_LIST)
-            HeapAlloc(GetProcessHeap(),0,bytes);
-        if(!attrs)return FALSE;
-        STARTUPINFOEXW sx;memset(&sx,0,sizeof(sx));
-        sx.StartupInfo.cb=sizeof(sx);sx.lpAttributeList=attrs;
-        if(InitializeProcThreadAttributeList(attrs,1,0,&bytes)){
-            DWORD policy=PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
-            if(UpdateProcThreadAttribute(attrs,0,
-                PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
-                &policy,sizeof(policy),0,0)){
-                ok=CreateProcessW(app,cmdline,0,0,FALSE,
-                    EXTENDED_STARTUPINFO_PRESENT,0,
-                    wd&&wd[0]?wd:0,&sx.StartupInfo,&p);
-            }
-            DeleteProcThreadAttributeList(attrs);
-        }
-        HeapFree(GetProcessHeap(),0,attrs);
+static void PumpMessages() {
+  MSG message;
+  while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+    if (message.message == WM_QUIT) {
+      continue;
     }
-    if(!ok)return FALSE;
-    CloseHandle(p.hThread);*outProcess=p.hProcess;return TRUE;
+    TranslateMessage(&message);
+    DispatchMessageW(&message);
+  }
 }
 
-static BOOL prerun()
-{
-    WCHAR pre[MAX_PATH];pre[0]=0;
-    getconfig(L"PreRunExecutable",L"",pre,MAX_PATH);
-    if(!pre[0])return TRUE;
-
-    preargsbuf[0]=0;
-    getconfig(L"PreRunArguments",L"",preargsbuf,32768);
-
-    WCHAR app[MAX_PATH],wd[MAX_PATH];
-    workdir(pre,wd);cp(app,pre,MAX_PATH);
-    const WCHAR*args=preargsbuf;
-
-    if(endsi(pre,L".bat")||endsi(pre,L".cmd")){
-        if(!systemexe(L"\\System32\\cmd.exe",app))return FALSE;
-        precmd[0]=0;
-        if(!ap(precmd,32768,L"/d /s /c \"\"")||
-           !ap(precmd,32768,pre)||!ap(precmd,32768,L"\"")||
-           (preargsbuf[0]&&(!ap(precmd,32768,L" ")||
-                            !ap(precmd,32768,preargsbuf)))||
-           !ap(precmd,32768,L"\""))return FALSE;
-        args=precmd;
-    }else if(endsi(pre,L".ps1")){
-        if(!systemexe(L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",app))
-            return FALSE;
-        precmd[0]=0;
-        if(!ap(precmd,32768,L"-NoProfile -ExecutionPolicy Bypass -File \"")||
-           !ap(precmd,32768,pre)||!ap(precmd,32768,L"\"")||
-           (preargsbuf[0]&&(!ap(precmd,32768,L" ")||
-                            !ap(precmd,32768,preargsbuf))))return FALSE;
-        args=precmd;
-    }else if(endsi(pre,L".py")||endsi(pre,L".pyw")){
-        app[0]=0;
-        getconfig(L"PreRunInterpreter",L"",app,MAX_PATH);
-        if(!app[0])return FALSE;
-        precmd[0]=0;
-        if(!ap(precmd,32768,L"\"")||!ap(precmd,32768,pre)||
-           !ap(precmd,32768,L"\"")||
-           (preargsbuf[0]&&(!ap(precmd,32768,L" ")||
-                            !ap(precmd,32768,preargsbuf))))return FALSE;
-        args=precmd;
+static BOOL WaitForProcessExit(HANDLE process, DWORD* exit_code) {
+  for (;;) {
+    DWORD result = MsgWaitForMultipleObjects(1, &process, FALSE, INFINITE,
+                                             QS_ALLINPUT);
+    if (result == WAIT_OBJECT_0) {
+      break;
     }
+    if (result == WAIT_OBJECT_0 + 1) {
+      PumpMessages();
+      continue;
+    }
+    return FALSE;
+  }
 
-    HANDLE p=0;
-    if(!startproc(app,args,wd,FALSE,&p))return FALSE;
-    DWORD exitCode=1;
-    BOOL ok=waitexit(p,&exitCode)&&exitCode==0;
-    CloseHandle(p);return ok;
+  return GetExitCodeProcess(process, exit_code);
 }
 
-static BOOL launch(const WCHAR*e)
-{
-    argsbuf[0]=0;getconfig(L"Arguments",L"",argsbuf,32768);
-    WCHAR wd[MAX_PATH];workdir(e,wd);
-    return startproc(e,argsbuf,wd,preventChildProcesses,&child);
+static void BuildIniPath() {
+  DWORD length = GetModuleFileNameW(nullptr, ini_path, MAX_PATH);
+  if (!length || length >= MAX_PATH) {
+    ini_path[0] = 0;
+    return;
+  }
+
+  WCHAR* last_separator = nullptr;
+  for (WCHAR* cursor = ini_path; *cursor; ++cursor) {
+    if (*cursor == L'\\' || *cursor == L'/') {
+      last_separator = cursor;
+    }
+  }
+
+  if (last_separator) {
+    CopyString(last_separator + 1, L"RestrictedShell.ini",
+               MAX_PATH - static_cast<int>(last_separator + 1 - ini_path));
+  } else {
+    CopyString(ini_path, L"RestrictedShell.ini", MAX_PATH);
+  }
 }
 
-static void cleanup()
-{
-    if(hk){UnhookWindowsHookEx(hk);hk=0;}
-    if(shellHookRegistered&&mw){DeregisterShellHookWindow(mw);shellHookRegistered=FALSE;}
-    restoreshellmetrics();
-    if(child){CloseHandle(child);child=0;}
-    if(de){de->Release();de=0;}
-    CoUninitialize();
+static void GetConfig(const WCHAR* key, const WCHAR* fallback,
+                      WCHAR* output, DWORD output_chars) {
+  static WCHAR global_value[kCommandBufferChars];
+
+  global_value[0] = 0;
+  GetPrivateProfileStringW(L"RestrictedShell", key, fallback, global_value,
+                           kCommandBufferChars, ini_path);
+
+  if (username[0]) {
+    GetPrivateProfileStringW(username, key, global_value, output, output_chars,
+                             ini_path);
+  } else {
+    CopyString(output, global_value, static_cast<int>(output_chars));
+  }
 }
 
-extern "C" void WINAPI entry()
-{
-    HINSTANCE i=GetModuleHandleW(0);
-    CoInitializeEx(0,COINIT_APARTMENTTHREADED);
-    makeinipath();
+static BOOL StartProcess(const WCHAR* executable, const WCHAR* arguments,
+                         const WCHAR* working_directory,
+                         BOOL restrict_children, HANDLE* output_process) {
+  if (!BuildCommandLine(executable, arguments)) {
+    return FALSE;
+  }
 
-    username[0]=0;
-    DWORD userchars=(DWORD)(sizeof(username)/sizeof(username[0]));
-    if(!GetUserNameW(username,&userchars))username[0]=0;
+  PROCESS_INFORMATION process_info;
+  memset(&process_info, 0, sizeof(process_info));
+  BOOL success = FALSE;
 
-    WCHAR v[16];
-    getconfig(L"LogoffOnExit",L"1",v,16);
-    logoffOnExit=!(v[0]==L'0'&&v[1]==0);
-    getconfig(L"BlockShellHotkeys",L"1",v,16);
-    blockShellHotkeys=!(v[0]==L'0'&&v[1]==0);
-    getconfig(L"PreventChildProcesses",L"0",v,16);
-    preventChildProcesses=!(v[0]==L'0'&&v[1]==0);
-    getconfig(L"StandardKeyboardVolumeShortcuts",L"0",v,16);
-    standardKeyboardVolumeShortcuts=!(v[0]==L'0'&&v[1]==0);
+  if (!restrict_children) {
+    STARTUPINFOW startup_info;
+    memset(&startup_info, 0, sizeof(startup_info));
+    startup_info.cb = sizeof(startup_info);
 
-    WNDCLASSW a,b;memset(&a,0,sizeof(a));memset(&b,0,sizeof(b));
-    a.lpfnWndProc=msgproc;a.hInstance=i;a.lpszClassName=L"RSM";RegisterClassW(&a);
-    b.lpfnWndProc=osdproc;b.hInstance=i;b.lpszClassName=L"RSO";RegisterClassW(&b);
-
-    mw=CreateWindowExW(WS_EX_TOOLWINDOW,L"RSM",L"",WS_POPUP,
-        0,0,0,0,0,0,i,0);
-    ow=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,
-        L"RSO",L"",WS_POPUP,0,0,360,104,0,0,i,0);
-
-    audioinit();
-    hk=SetWindowsHookExW(WH_KEYBOARD_LL,keyproc,i,0);
-    if(!hk){
-        MessageBoxW(0,L"Could not install keyboard hook.",
-            L"Restricted Shell",MB_ICONERROR);
-        cleanup();ExitProcess(3);
+    success = CreateProcessW(
+        executable, command_line, nullptr, nullptr, FALSE, 0, nullptr,
+        working_directory && working_directory[0] ? working_directory : nullptr,
+        &startup_info, &process_info);
+  } else {
+    SIZE_T attribute_bytes = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_bytes);
+    if (!attribute_bytes) {
+      return FALSE;
     }
 
-    if(!prerun()){
-        MessageBoxW(0,L"The configured pre-run program failed or returned an error.",
-            L"Restricted Shell",MB_ICONERROR);
-        cleanup();ExitProcess(4);
+    auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
+        HeapAlloc(GetProcessHeap(), 0, attribute_bytes));
+    if (!attributes) {
+      return FALSE;
     }
 
-    enableshellhook();
+    STARTUPINFOEXW startup_info;
+    memset(&startup_info, 0, sizeof(startup_info));
+    startup_info.StartupInfo.cb = sizeof(startup_info);
+    startup_info.lpAttributeList = attributes;
 
-    WCHAR exe[MAX_PATH];exe[0]=0;
-    getconfig(L"Executable",L"",exe,MAX_PATH);
-    if(!exe[0]||!launch(exe)){
-        MessageBoxW(0,L"Could not launch Executable in RestrictedShell.ini.",
-            L"Restricted Shell",MB_ICONERROR);
-        cleanup();ExitProcess(2);
+    if (InitializeProcThreadAttributeList(attributes, 1, 0,
+                                          &attribute_bytes)) {
+      DWORD policy = PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
+      if (UpdateProcThreadAttribute(
+              attributes, 0, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
+              &policy, sizeof(policy), nullptr, nullptr)) {
+        success = CreateProcessW(
+            executable, command_line, nullptr, nullptr, FALSE,
+            EXTENDED_STARTUPINFO_PRESENT, nullptr,
+            working_directory && working_directory[0] ? working_directory
+                                                       : nullptr,
+            &startup_info.StartupInfo, &process_info);
+      }
+      DeleteProcThreadAttributeList(attributes);
     }
 
-    SetTimer(mw,T_PROCESS,500,0);
-    MSG m;
-    while(GetMessageW(&m,0,0,0)>0){TranslateMessage(&m);DispatchMessageW(&m);}
-    UINT code=(UINT)m.wParam;
-    cleanup();ExitProcess(code);
+    HeapFree(GetProcessHeap(), 0, attributes);
+  }
+
+  if (!success) {
+    return FALSE;
+  }
+
+  CloseHandle(process_info.hThread);
+  *output_process = process_info.hProcess;
+  return TRUE;
+}
+
+static BOOL RunPreLaunchCommand() {
+  WCHAR pre_run_executable[MAX_PATH];
+  pre_run_executable[0] = 0;
+  GetConfig(L"PreRunExecutable", L"", pre_run_executable, MAX_PATH);
+  if (!pre_run_executable[0]) {
+    return TRUE;
+  }
+
+  pre_run_arguments[0] = 0;
+  GetConfig(L"PreRunArguments", L"", pre_run_arguments,
+            kCommandBufferChars);
+
+  WCHAR executable[MAX_PATH];
+  WCHAR working_directory[MAX_PATH];
+  GetWorkingDirectory(pre_run_executable, working_directory);
+  CopyString(executable, pre_run_executable, MAX_PATH);
+  const WCHAR* arguments = pre_run_arguments;
+
+  if (EndsWithCaseInsensitive(pre_run_executable, L".bat") ||
+      EndsWithCaseInsensitive(pre_run_executable, L".cmd")) {
+    if (!GetSystemExecutable(L"\\System32\\cmd.exe", executable)) {
+      return FALSE;
+    }
+
+    pre_run_command[0] = 0;
+    if (!AppendString(pre_run_command, kCommandBufferChars, L"/d /s /c \"\"") ||
+        !AppendString(pre_run_command, kCommandBufferChars,
+                      pre_run_executable) ||
+        !AppendString(pre_run_command, kCommandBufferChars, L"\"") ||
+        (pre_run_arguments[0] &&
+         (!AppendString(pre_run_command, kCommandBufferChars, L" ") ||
+          !AppendString(pre_run_command, kCommandBufferChars,
+                        pre_run_arguments))) ||
+        !AppendString(pre_run_command, kCommandBufferChars, L"\"")) {
+      return FALSE;
+    }
+    arguments = pre_run_command;
+  } else if (EndsWithCaseInsensitive(pre_run_executable, L".ps1")) {
+    if (!GetSystemExecutable(
+            L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            executable)) {
+      return FALSE;
+    }
+
+    pre_run_command[0] = 0;
+    if (!AppendString(pre_run_command, kCommandBufferChars,
+                      L"-NoProfile -ExecutionPolicy Bypass -File \"") ||
+        !AppendString(pre_run_command, kCommandBufferChars,
+                      pre_run_executable) ||
+        !AppendString(pre_run_command, kCommandBufferChars, L"\"") ||
+        (pre_run_arguments[0] &&
+         (!AppendString(pre_run_command, kCommandBufferChars, L" ") ||
+          !AppendString(pre_run_command, kCommandBufferChars,
+                        pre_run_arguments)))) {
+      return FALSE;
+    }
+    arguments = pre_run_command;
+  } else if (EndsWithCaseInsensitive(pre_run_executable, L".py") ||
+             EndsWithCaseInsensitive(pre_run_executable, L".pyw")) {
+    executable[0] = 0;
+    GetConfig(L"PreRunInterpreter", L"", executable, MAX_PATH);
+    if (!executable[0]) {
+      return FALSE;
+    }
+
+    pre_run_command[0] = 0;
+    if (!AppendString(pre_run_command, kCommandBufferChars, L"\"") ||
+        !AppendString(pre_run_command, kCommandBufferChars,
+                      pre_run_executable) ||
+        !AppendString(pre_run_command, kCommandBufferChars, L"\"") ||
+        (pre_run_arguments[0] &&
+         (!AppendString(pre_run_command, kCommandBufferChars, L" ") ||
+          !AppendString(pre_run_command, kCommandBufferChars,
+                        pre_run_arguments)))) {
+      return FALSE;
+    }
+    arguments = pre_run_command;
+  }
+
+  HANDLE process = nullptr;
+  if (!StartProcess(executable, arguments, working_directory, FALSE, &process)) {
+    return FALSE;
+  }
+
+  DWORD exit_code = 1;
+  BOOL success = WaitForProcessExit(process, &exit_code) && exit_code == 0;
+  CloseHandle(process);
+  return success;
+}
+
+static BOOL LaunchTarget(const WCHAR* executable) {
+  target_arguments[0] = 0;
+  GetConfig(L"Arguments", L"", target_arguments, kCommandBufferChars);
+
+  WCHAR working_directory[MAX_PATH];
+  GetWorkingDirectory(executable, working_directory);
+
+  return StartProcess(executable, target_arguments, working_directory,
+                      prevent_child_processes, &child_process);
+}
+
+static void Cleanup() {
+  if (keyboard_hook) {
+    UnhookWindowsHookEx(keyboard_hook);
+    keyboard_hook = nullptr;
+  }
+
+  if (shell_hook_registered && message_window) {
+    DeregisterShellHookWindow(message_window);
+    shell_hook_registered = FALSE;
+  }
+
+  RestoreShellMetrics();
+
+  if (child_process) {
+    CloseHandle(child_process);
+    child_process = nullptr;
+  }
+
+  if (device_enumerator) {
+    device_enumerator->Release();
+    device_enumerator = nullptr;
+  }
+
+  CoUninitialize();
+}
+
+extern "C" void WINAPI entry() {
+  HINSTANCE instance = GetModuleHandleW(nullptr);
+  CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  BuildIniPath();
+
+  username[0] = 0;
+  DWORD username_chars =
+      static_cast<DWORD>(sizeof(username) / sizeof(username[0]));
+  if (!GetUserNameW(username, &username_chars)) {
+    username[0] = 0;
+  }
+
+  WCHAR config_value[16];
+
+  GetConfig(L"LogoffOnExit", L"1", config_value, 16);
+  logoff_on_exit = !(config_value[0] == L'0' && config_value[1] == 0);
+
+  GetConfig(L"BlockShellHotkeys", L"1", config_value, 16);
+  block_shell_hotkeys = !(config_value[0] == L'0' && config_value[1] == 0);
+
+  GetConfig(L"PreventChildProcesses", L"0", config_value, 16);
+  prevent_child_processes =
+      !(config_value[0] == L'0' && config_value[1] == 0);
+
+  GetConfig(L"StandardKeyboardVolumeShortcuts", L"0", config_value, 16);
+  standard_keyboard_volume_shortcuts =
+      !(config_value[0] == L'0' && config_value[1] == 0);
+
+  WNDCLASSW message_class;
+  WNDCLASSW osd_class;
+  memset(&message_class, 0, sizeof(message_class));
+  memset(&osd_class, 0, sizeof(osd_class));
+
+  message_class.lpfnWndProc = MessageWindowProc;
+  message_class.hInstance = instance;
+  message_class.lpszClassName = L"RSM";
+  RegisterClassW(&message_class);
+
+  osd_class.lpfnWndProc = OsdWindowProc;
+  osd_class.hInstance = instance;
+  osd_class.lpszClassName = L"RSO";
+  RegisterClassW(&osd_class);
+
+  message_window = CreateWindowExW(WS_EX_TOOLWINDOW, L"RSM", L"", WS_POPUP,
+                                   0, 0, 0, 0, nullptr, nullptr, instance,
+                                   nullptr);
+  osd_window = CreateWindowExW(
+      WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"RSO", L"",
+      WS_POPUP, 0, 0, 360, 104, nullptr, nullptr, instance, nullptr);
+
+  InitializeAudio();
+
+  keyboard_hook =
+      SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardHookProc, instance, 0);
+  if (!keyboard_hook) {
+    MessageBoxW(nullptr, L"Could not install keyboard hook.",
+                L"Restricted Shell", MB_ICONERROR);
+    Cleanup();
+    ExitProcess(3);
+  }
+
+  if (!RunPreLaunchCommand()) {
+    MessageBoxW(nullptr,
+                L"The configured pre-run program failed or returned an error.",
+                L"Restricted Shell", MB_ICONERROR);
+    Cleanup();
+    ExitProcess(4);
+  }
+
+  EnableShellHook();
+
+  WCHAR target_executable[MAX_PATH];
+  target_executable[0] = 0;
+  GetConfig(L"Executable", L"", target_executable, MAX_PATH);
+  if (!target_executable[0] || !LaunchTarget(target_executable)) {
+    MessageBoxW(nullptr,
+                L"Could not launch Executable in RestrictedShell.ini.",
+                L"Restricted Shell", MB_ICONERROR);
+    Cleanup();
+    ExitProcess(2);
+  }
+
+  SetTimer(message_window, kProcessTimerId, 500, nullptr);
+
+  MSG message;
+  while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+    TranslateMessage(&message);
+    DispatchMessageW(&message);
+  }
+
+  UINT exit_code = static_cast<UINT>(message.wParam);
+  Cleanup();
+  ExitProcess(exit_code);
 }
