@@ -41,7 +41,21 @@ function Profile($sid){$k="HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Pr
 function Hive($sid,$prof,[scriptblock]$b){$h="Registry::HKEY_USERS\$sid";if(Test-Path $h){&$b $h;return};$m='RS_'+[guid]::NewGuid().ToString('N');reg load "HKU\$m" (Join-Path $prof NTUSER.DAT)|Out-Null;if($LASTEXITCODE){throw'Could not load user hive.'};try{&$b "Registry::HKEY_USERS\$m"}finally{[gc]::Collect();[gc]::WaitForPendingFinalizers();reg unload "HKU\$m"|Out-Null}}
 function SaveV($d,$m,$p,$n,$k){$x=Get-ItemProperty $p -Name $n -ErrorAction SilentlyContinue;if($null-ne$x){SetI $d $m $k $x.$n}else{SetI $d $m $k '__MISSING__'}}
 function RestoreV($p,$n,$v,$type){if($v-eq'__MISSING__'){Remove-ItemProperty $p -Name $n -ErrorAction SilentlyContinue}else{New-Item $p -Force|Out-Null;New-ItemProperty $p -Name $n -PropertyType $type -Value $v -Force|Out-Null}}
-function PicCandidate($e){$d=[IO.Path]::GetDirectoryName($e);$b=[IO.Path]::GetFileNameWithoutExtension($e);foreach($n in @("$b.ico",'app.ico','icon.ico','logo.ico')){$x=Join-Path $d $n;if(Test-Path $x){return$x}};$i=@(Get-ChildItem $d -Filter *.ico -File -ErrorAction SilentlyContinue);if($i.Count-eq1){return$i[0].FullName};foreach($n in @("$b.png",'app.png','icon.png','logo.png','app-icon.png')){$x=Join-Path $d $n;if(Test-Path $x){return$x}};$e}
+function PicCandidate($e) {
+ $d = [IO.Path]::GetDirectoryName($e)
+ $b = [IO.Path]::GetFileNameWithoutExtension($e)
+ foreach($n in @("$b.ico", 'app.ico', 'icon.ico', 'logo.ico')) {
+  $x = Join-Path $d $n
+  if(Test-Path $x) { return $x }
+ }
+ $i = @(Get-ChildItem $d -Filter *.ico -File -ErrorAction SilentlyContinue)
+ if($i.Count -eq 1) { return $i[0].FullName }
+ foreach($n in @("$b.png", 'app.png', 'icon.png', 'logo.png', 'app-icon.png')) {
+  $x = Join-Path $d $n
+  if(Test-Path $x) { return $x }
+ }
+ return $e
+}
 function Bitmap($p){$e=[IO.Path]::GetExtension($p).ToLower();if($e-in'.exe','.ico'){$i=if($e-eq'.exe'){[Drawing.Icon]::ExtractAssociatedIcon($p)}else{[Drawing.Icon]::new($p)};try{$i.ToBitmap()}finally{$i.Dispose()}}else{$i=[Drawing.Image]::FromFile($p);try{[Drawing.Bitmap]::new($i)}finally{$i.Dispose()}}}
 function InstallPicture($sid,$source){
  if(-not$source-or-not(Test-Path $source)){return}
