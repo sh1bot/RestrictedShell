@@ -2,12 +2,17 @@
 
 [CmdletBinding()]
 param(
-    [string]$IniPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'RestrictedShell.ini'),
+    [string]$IniPath = '',
     [string]$Section = 'AudioDefaults',
     [switch]$ValidateOnly
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $IniPath) {
+    $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $IniPath = Join-Path (Split-Path -Parent $scriptDirectory) 'RestrictedShell.ini'
+}
 
 if (-not ('RestrictedShell.AudioPreset' -as [type])) {
     Add-Type -TypeDefinition @'
