@@ -12,11 +12,16 @@ where cl >nul 2>nul || (
   exit /b 1
 )
 
-cl /nologo /c /std:c++17 /O1 /GL /GS- /GR- /Zl RestrictedShell.cpp /Fo:RestrictedShell-%ARCH%.obj
+cl /nologo /c /std:c++17 /O1 /GL /GS /guard:cf /GR- /Zl RestrictedShell.cpp /Fo:RestrictedShell-%ARCH%.obj
 if errorlevel 1 exit /b %errorlevel%
 
-link /nologo RestrictedShell-%ARCH%.obj kernel32.lib user32.lib gdi32.lib ole32.lib advapi32.lib ^
- /SUBSYSTEM:WINDOWS /ENTRY:entry /NODEFAULTLIB ^
+cl /nologo /c /std:c++17 /O1 /GL /GS- /GR- /Zl SecurityEntry.cpp /Fo:SecurityEntry-%ARCH%.obj
+if errorlevel 1 exit /b %errorlevel%
+
+link /nologo RestrictedShell-%ARCH%.obj SecurityEntry-%ARCH%.obj ^
+ kernel32.lib user32.lib gdi32.lib ole32.lib advapi32.lib libvcruntime.lib ^
+ /SUBSYSTEM:WINDOWS /ENTRY:secure_entry /NODEFAULTLIB ^
+ /DYNAMICBASE /NXCOMPAT /guard:cf ^
  /OPT:REF /OPT:ICF /LTCG /MERGE:.rdata=.text ^
  /OUT:"%OUT%"
 exit /b %errorlevel%
