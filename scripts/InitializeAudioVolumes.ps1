@@ -14,9 +14,9 @@ if (-not $IniPath) {
     $IniPath = Join-Path (Split-Path -Parent $scriptDirectory) 'RestrictedShell.ini'
 }
 
-# PowerShell 5.1 has no built-in Core Audio cmdlets. Keep the interop layer small:
-# enumerate render endpoints, identify their form factor/default roles, and set
-# an endpoint's master volume. The actual selection policy stays in PowerShell.
+# Windows PowerShell 5.1 has no Core Audio cmdlets. This C# block is only the
+# interop boundary: enumerate render endpoints and set one endpoint's volume.
+# Endpoint-selection policy remains ordinary PowerShell below.
 if (-not ('RestrictedShell.AudioEndpoints' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -29,7 +29,6 @@ namespace RestrictedShell
     {
         public string Id;
         public string Name;
-        public uint State;
         public uint FormFactor;
         public bool Active;
         public bool Private;
@@ -196,9 +195,8 @@ namespace RestrictedShell
         public static AudioEndpoint[] Enumerate()
         {
             IMMDeviceEnumerator e = null;
-            IMMDeviceCollection collection = null;
+            IMMDeviceCollection devices = null;
             List<AudioEndpoint> result = new List<AudioEndpoint>();
-
             try
             {
                 e = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
@@ -206,9 +204,9 @@ namespace RestrictedShell
                 string multimedia = DefaultId(e, ERole.Multimedia);
                 string communications = DefaultId(e, ERole.Communications);
 
-                e.EnumAudioEndpoints(EDataFlow.Render, Active | Unplugged, out collection);
+                e.EnumAudioEndpoints(EDataFlow.Render, Active | Unplugged, out devices);
                 uint count;
-                collection.GetCount(out count);
+                devices.GetCount(out count);
 
                 for (uint i = 0; i < count; i++)
                 {
@@ -216,7 +214,7 @@ namespace RestrictedShell
                     IPropertyStore properties = null;
                     try
                     {
-                        collection.Item(i, out device);
+                        devices.Item(i, out device);
                         string id;
                         uint state;
                         device.GetId(out id);
@@ -225,11 +223,9 @@ namespace RestrictedShell
 
                         string name = StringProperty(properties, FriendlyName);
                         uint form = UIntProperty(properties, FormFactor, 10);
-
                         result.Add(new AudioEndpoint {
                             Id = id,
                             Name = String.IsNullOrEmpty(name) ? id : name,
-                            State = state,
                             FormFactor = form,
                             Active = (state & Active) != 0,
                             Private = form == 3 || form == 5 || form == 6,
@@ -244,12 +240,11 @@ namespace RestrictedShell
                         Release(device);
                     }
                 }
-
                 return result.ToArray();
             }
             finally
             {
-                Release(collection);
+                Release(devices);
                 Release(e);
             }
         }
@@ -261,19 +256,19 @@ namespace RestrictedShell
 
             IMMDeviceEnumerator e = null;
             IMMDevice device = null;
-            object volumeObject = null;
+            object volume = null;
             try
             {
                 e = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
                 e.GetDevice(id, out device);
                 Guid iid = EndpointVolumeIid;
-                device.Activate(ref iid, ClsCtxAll, IntPtr.Zero, out volumeObject);
-                ((IAudioEndpointVolume)volumeObject).SetMasterVolumeLevelScalar(
+                device.Activate(ref iid, ClsCtxAll, IntPtr.Zero, out volume);
+                ((IAudioEndpointVolume)volume).SetMasterVolumeLevelScalar(
                     percent / 100.0f, IntPtr.Zero);
             }
             finally
             {
-                Release(volumeObject);
+                Release(volume);
                 Release(device);
                 Release(e);
             }
@@ -297,7 +292,6 @@ function Read-IniSection {
 
     $values = @{}
     $inside = $false
-
     foreach ($line in Get-Content -LiteralPath $Path) {
         $text = $line.Trim()
         if ($text -match '^\[(.+)\]$') {
@@ -307,13 +301,11 @@ function Read-IniSection {
             $values[$matches[1].Trim()] = $matches[2].Trim()
         }
     }
-
     return $values
 }
 
 function Get-VolumeSetting {
     param($Values, [string]$Name)
-
     $value = 0
     if (-not $Values.ContainsKey($Name) -or
         -not [int]::TryParse($Values[$Name], [ref]$value) -or
@@ -324,63 +316,32 @@ function Get-VolumeSetting {
 }
 
 $formFactorNames = @{
-    0 = 'RemoteNetworkDevice'
-    1 = 'Speakers'
-    2 = 'LineLevel'
-    3 = 'Headphones'
-    5 = 'Headset'
-    6 = 'Handset'
-    7 = 'UnknownDigitalPassthrough'
-    8 = 'SPDIF'
-    9 = 'DigitalAudioDisplayDevice'
-    10 = 'UnknownFormFactor'
+    0='RemoteNetworkDevice'; 1='Speakers'; 2='LineLevel'; 3='Headphones'
+    5='Headset'; 6='Handset'; 7='UnknownDigitalPassthrough'; 8='SPDIF'
+    9='DigitalAudioDisplayDevice'; 10='UnknownFormFactor'
 }
+$publicFormPreference = @(1,2,9,8,7,10)
+$privateFormPreference = @(3,5,6)
 
-function Get-EndpointScore {
+function Get-FormPreference {
     param($Endpoint, [bool]$Private)
-
-    $score = 0
-    if ($Endpoint.DefaultMultimedia) { $score += 3000 }
-    elseif ($Endpoint.DefaultConsole) { $score += 2500 }
-    elseif ($Endpoint.DefaultCommunications) { $score += 2000 }
-    if ($Endpoint.Active) { $score += 1000 }
-
-    if ($Private) {
-        $score += switch ($Endpoint.FormFactor) {
-            3 { 300 }
-            5 { 250 }
-            6 { 200 }
-            default { 0 }
-        }
-    }
-    else {
-        $score += switch ($Endpoint.FormFactor) {
-            1 { 600 }
-            2 { 500 }
-            9 { 400 }
-            8 { 300 }
-            7 { 200 }
-            10 { 100 }
-            default { 0 }
-        }
-    }
-
-    return $score
+    $order = if ($Private) { $privateFormPreference } else { $publicFormPreference }
+    $index = [Array]::IndexOf($order, [int]$Endpoint.FormFactor)
+    if ($index -lt 0) { return 0 }
+    return $order.Count - $index
 }
 
 function Select-BestEndpoint {
     param($Endpoints, [bool]$Private)
 
-    $best = $null
-    $bestScore = [int]::MinValue
-    foreach ($endpoint in $Endpoints) {
-        $score = Get-EndpointScore $endpoint $Private
-        if ($null -eq $best -or $score -gt $bestScore) {
-            $best = $endpoint
-            $bestScore = $score
-        }
-    }
-    return $best
+    return $Endpoints |
+        Sort-Object `
+            @{Expression={$_.DefaultMultimedia};Descending=$true}, `
+            @{Expression={$_.DefaultConsole};Descending=$true}, `
+            @{Expression={$_.DefaultCommunications};Descending=$true}, `
+            @{Expression={$_.Active};Descending=$true}, `
+            @{Expression={Get-FormPreference $_ $Private};Descending=$true} |
+        Select-Object -First 1
 }
 
 function Describe-Endpoint {
@@ -395,7 +356,6 @@ try {
     $publicVolume = Get-VolumeSetting $settings 'PublicVolume'
     $privateVolume = Get-VolumeSetting $settings 'PrivateVolume'
     $endpoints = @([RestrictedShell.AudioEndpoints]::Enumerate())
-
     if (-not $endpoints.Count) {
         throw 'No active or unplugged render endpoints were found.'
     }
@@ -406,16 +366,14 @@ try {
 
     $public = Select-BestEndpoint $publicCandidates $false
     [RestrictedShell.AudioEndpoints]::SetVolume($public.Id, $publicVolume)
-
     if ($usedSafetyFallback) {
         Write-Output "No distinct public endpoint was identifiable; treating $(Describe-Endpoint $public) as public for safety."
     }
     Write-Output "Public: $(Describe-Endpoint $public) -> $publicVolume%"
 
-    $privateCandidates = @($endpoints | Where-Object {
+    $private = Select-BestEndpoint @($endpoints | Where-Object {
         $_.Private -and $_.Id -ne $public.Id
-    })
-    $private = Select-BestEndpoint $privateCandidates $true
+    }) $true
 
     if ($private) {
         try {
