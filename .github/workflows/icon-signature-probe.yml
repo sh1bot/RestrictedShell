@@ -2,7 +2,7 @@ name: Icon signature probe
 
 on:
   push:
-    branches: [icon-signature-probe]
+    branches: [main]
 
 jobs:
   probe:
