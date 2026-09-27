@@ -165,13 +165,15 @@ function Write-IniFile {
         $lines.Add('')
     }
 
-    $temp = Join-Path $installDir ('.RestrictedShell.' + [guid]::NewGuid().ToString('N') + '.tmp')
+    $id = [guid]::NewGuid().ToString('N')
+    $temp = Join-Path $installDir ".RestrictedShell.$id.tmp"
+    $backup = Join-Path $installDir ".RestrictedShell.$id.bak"
     try {
         [IO.File]::WriteAllLines($temp, $lines, [Text.UTF8Encoding]::new($false))
         Protect-RestrictedFile $temp
 
         if (Test-Path -LiteralPath $ini -PathType Leaf) {
-            [IO.File]::Replace($temp, $ini, $null)
+            [IO.File]::Replace($temp, $ini, $backup)
         }
         else {
             [IO.File]::Move($temp, $ini)
@@ -179,8 +181,10 @@ function Write-IniFile {
         Protect-RestrictedFile $ini
     }
     finally {
-        if (Test-Path -LiteralPath $temp) {
-            Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+        foreach ($path in @($temp, $backup)) {
+            if (Test-Path -LiteralPath $path) {
+                Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 }
@@ -945,16 +949,6 @@ function Refresh-AccountState {
         return
     }
 
-    $appTextBox.Text = ''
-    $argumentsTextBox.Text = ''
-    $preRunTextBox.Text = ''
-    $preRunArgumentsTextBox.Text = ''
-    $picturePathTextBox.Text = ''
-    $preventChildProcesses.Checked = $false
-    $standardKeyboardVolumeShortcuts.Checked = $false
-    $blockShellHotkeys.Checked = $true
-    $logoffOnExit.Checked = $true
-
     $data = Read-IniFile $ini
     $metadataSection = "Setup:$($user.Name)"
     $revertButton.Enabled = (
@@ -963,6 +957,9 @@ function Refresh-AccountState {
         ($data[$metadataSection].Converted -eq '1' -or $data[$metadataSection].RollbackReady -eq '1')
     )
 
+    # A user with saved configuration gets that configuration. For a user that
+    # has not been configured yet, keep the current form values as the draft
+    # instead of clearing selections the administrator has just made.
     if ($data.Contains($user.Name)) {
         $section = $data[$user.Name]
         $appTextBox.Text = $section.Executable
