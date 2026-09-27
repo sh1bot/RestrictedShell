@@ -53,8 +53,16 @@ jobs:
           Copy-Item artifacts/RestrictedShell-x86/RestrictedShell.exe package/bin/x86/
           Copy-Item artifacts/RestrictedShell-x64/RestrictedShell.exe package/bin/x64/
           Copy-Item artifacts/RestrictedShell-arm64/RestrictedShell.exe package/bin/arm64/
-          Copy-Item RestrictedShellSetup.ps1,RestrictedShell.ini,README.md package/
-          if (Test-Path RestrictedShellPicture.ps1) { Copy-Item RestrictedShellPicture.ps1 package/ }
+          Copy-Item RestrictedShellSetup.ps1,RestrictedShellPicture.ps1,RestrictedShell.ini,README.md package/
+
+          # Load the size-aware icon helper after the setup script's built-in
+          # functions have been defined, so these definitions override them.
+          $setupPath = 'package/RestrictedShellSetup.ps1'
+          $setup = Get-Content $setupPath -Raw
+          $loader = ". (`$PSScriptRoot + '\RestrictedShellPicture.ps1')`r`n`r`n[void]`$form.ShowDialog()"
+          $setup = $setup.Replace('[void]$form.ShowDialog()', $loader)
+          Set-Content $setupPath -Value $setup -Encoding UTF8
+
           Compress-Archive package/* RestrictedShell.zip
       - uses: actions/upload-artifact@v4
         with:
