@@ -57,6 +57,64 @@ $installDir = Join-Path $env:ProgramData 'RestrictedShell'
 $ini = Join-Path $installDir 'RestrictedShell.ini'
 $shell = Join-Path $installDir 'RestrictedShell.exe'
 
+function Protect-RestrictedShellStorage {
+    if (-not (Test-Path -LiteralPath $installDir)) {
+        return
+    }
+
+    $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $administratorsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+    $inherit = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+
+    $directoryAcl = [Security.AccessControl.DirectorySecurity]::new()
+    $directoryAcl.SetAccessRuleProtection($true, $false)
+    $directoryAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $systemSid,
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        $inherit,
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow
+    ))
+    $directoryAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $administratorsSid,
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        $inherit,
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow
+    ))
+    $directoryAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $usersSid,
+        [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+        $inherit,
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow
+    ))
+    Set-Acl -LiteralPath $installDir -AclObject $directoryAcl
+
+    if (Test-Path -LiteralPath $ini) {
+        $fileAcl = [Security.AccessControl.FileSecurity]::new()
+        $fileAcl.SetAccessRuleProtection($true, $false)
+        $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $systemSid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.AccessControlType]::Allow
+        ))
+        $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $administratorsSid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.AccessControlType]::Allow
+        ))
+        $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $usersSid,
+            [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+            [Security.AccessControl.AccessControlType]::Allow
+        ))
+        Set-Acl -LiteralPath $ini -AclObject $fileAcl
+    }
+}
+
 function Get-NativeArchitecture {
     $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
 
@@ -77,6 +135,7 @@ function Install-RestrictedShell {
     }
 
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+    Protect-RestrictedShellStorage
     Copy-Item -LiteralPath $source -Destination $shell -Force
 
     if (-not (Test-Path -LiteralPath $ini)) {
@@ -86,10 +145,19 @@ function Install-RestrictedShell {
             Copy-Item -LiteralPath $template -Destination $ini
         }
         else {
-            $defaultIni = "[RestrictedShell]`r`nLogoffOnExit=1`r`nBlockShellHotkeys=1`r`n"
+            $defaultIni = @"
+[RestrictedShell]
+LogoffOnExit=1
+BlockShellHotkeys=1
+PreventChildProcesses=0
+PreRunExecutable=
+PreRunArguments=
+"@
             [IO.File]::WriteAllText($ini, $defaultIni, [Text.UTF8Encoding]::new($false))
         }
     }
+
+    Protect-RestrictedShellStorage
 }
 
 function Read-IniFile {
@@ -104,7 +172,6 @@ function Read-IniFile {
 
             if ($text -match '^\[(.+)\]$') {
                 $section = $matches[1]
-
                 if (-not $data.Contains($section)) {
                     $data[$section] = [ordered]@{}
                 }
@@ -135,22 +202,20 @@ function Write-IniFile {
 
     foreach ($section in $Data.Keys) {
         $lines.Add("[$section]")
-
         foreach ($key in $Data[$section].Keys) {
             $lines.Add("$key=$($Data[$section][$key])")
         }
-
         $lines.Add('')
     }
 
     [IO.File]::WriteAllLines($ini, $lines, [Text.UTF8Encoding]::new($false))
+    Protect-RestrictedShellStorage
 }
 
 function Get-ProfilePath {
     param($Sid)
 
     $key = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$Sid"
-
     if (Test-Path $key) {
         return [Environment]::ExpandEnvironmentVariables((Get-ItemProperty $key).ProfileImagePath)
     }
@@ -162,7 +227,6 @@ function Invoke-WithUserHive {
     param($Sid, $Profile, [scriptblock]$Body)
 
     $loadedHive = "Registry::HKEY_USERS\$Sid"
-
     if (Test-Path $loadedHive) {
         & $Body $loadedHive
         return
@@ -190,7 +254,6 @@ function Save-RegistryValue {
     param($Data, $Section, $Path, $Name, $Key)
 
     $value = Get-ItemProperty $Path -Name $Name -ErrorAction SilentlyContinue
-
     if ($null -ne $value) {
         Set-IniValue $Data $Section $Key $value.$Name
     }
@@ -211,36 +274,6 @@ function Restore-RegistryValue {
     New-ItemProperty $Path -Name $Name -PropertyType $Type -Value $Value -Force | Out-Null
 }
 
-function Find-PictureCandidate {
-    param($Executable)
-
-    $directory = [IO.Path]::GetDirectoryName($Executable)
-    $baseName = [IO.Path]::GetFileNameWithoutExtension($Executable)
-
-    foreach ($name in @("$baseName.ico", 'app.ico', 'icon.ico', 'logo.ico')) {
-        $candidate = Join-Path $directory $name
-
-        if (Test-Path -LiteralPath $candidate) {
-            return $candidate
-        }
-    }
-
-    $icons = @(Get-ChildItem -LiteralPath $directory -Filter *.ico -File -ErrorAction SilentlyContinue)
-    if ($icons.Count -eq 1) {
-        return $icons[0].FullName
-    }
-
-    foreach ($name in @("$baseName.png", 'app.png', 'icon.png', 'logo.png', 'app-icon.png')) {
-        $candidate = Join-Path $directory $name
-
-        if (Test-Path -LiteralPath $candidate) {
-            return $candidate
-        }
-    }
-
-    return $Executable
-}
-
 function Convert-IconHandleToBitmap {
     param([IntPtr]$Handle)
 
@@ -249,10 +282,8 @@ function Convert-IconHandleToBitmap {
     }
 
     $icon = [Drawing.Icon]::FromHandle($Handle)
-
     try {
         $bitmap = $icon.ToBitmap()
-
         try {
             return [Drawing.Bitmap]::new($bitmap)
         }
@@ -273,7 +304,6 @@ function Get-IcoBitmap {
 
     $IMAGE_ICON = 1
     $LR_LOADFROMFILE = 0x0010
-
     $handle = [RestrictedShell.NativeIcon]::LoadImageW(
         [IntPtr]::Zero,
         $Path,
@@ -296,7 +326,7 @@ function Get-IcoBitmap {
     }
 }
 
-function Get-ExeIconBitmap {
+function Get-EmbeddedExeIconBitmap {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][int]$Size
@@ -320,28 +350,166 @@ function Get-ExeIconBitmap {
         if ($count -gt 0 -and $count -ne [uint32]::MaxValue -and $handles[0] -ne [IntPtr]::Zero) {
             return Convert-IconHandleToBitmap $handles[0]
         }
-    }
-    catch {
-        # Continue to the conservative associated-icon fallback below.
+
+        return $null
     }
     finally {
         if ($handles[0] -ne [IntPtr]::Zero) {
             [void][RestrictedShell.NativeIcon]::DestroyIcon($handles[0])
         }
     }
+}
+
+function Get-ExeIconBitmap {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][int]$Size
+    )
+
+    try {
+        $embedded = Get-EmbeddedExeIconBitmap -Path $Path -Size $Size
+        if ($embedded) {
+            return $embedded
+        }
+    }
+    catch {
+        # Fall back to Windows' associated icon below.
+    }
 
     $fallback = [Drawing.Icon]::ExtractAssociatedIcon($Path)
-
     if ($null -eq $fallback) {
         throw "No icon could be extracted from '$Path'."
     }
 
     try {
-        return Convert-IconHandleToBitmap $fallback
+        $bitmap = $fallback.ToBitmap()
+        try {
+            return [Drawing.Bitmap]::new($bitmap)
+        }
+        finally {
+            $bitmap.Dispose()
+        }
     }
     finally {
         $fallback.Dispose()
     }
+}
+
+function Get-NormalizedBitmapHash {
+    param([Parameter(Mandatory = $true)][Drawing.Bitmap]$Bitmap)
+
+    $bytes = New-Object byte[] ($Bitmap.Width * $Bitmap.Height * 4)
+    $index = 0
+
+    for ($y = 0; $y -lt $Bitmap.Height; $y++) {
+        for ($x = 0; $x -lt $Bitmap.Width; $x++) {
+            $pixel = $Bitmap.GetPixel($x, $y)
+            $bytes[$index++] = $pixel.A
+            $bytes[$index++] = $pixel.R
+            $bytes[$index++] = $pixel.G
+            $bytes[$index++] = $pixel.B
+        }
+    }
+
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ($sha.ComputeHash($bytes) | ForEach-Object ToString x2) -join ''
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
+$genericIconSignatures = @(
+    @{
+        Name = 'PyInstaller console'
+        Hash32 = '933f506c84bddc927f19c4890c0b391bad30f59e4c2052607b6e4b6297d1d62f'
+        Hash48 = 'deb5efcddc9c870fb0e8bf3dabd86827e3f369de9ceded75afa98bc0e473e7f6'
+    },
+    @{
+        Name = 'PyInstaller windowed'
+        Hash32 = '26a47902011dde48fc5e45607ff2dcae0eeb0e71a588830aaeca181808c73fd0'
+        Hash48 = '315add701425584c9e4e069ecd6e437083b597f31bb561b0eae3683387f9ede0'
+    },
+    @{
+        Name = 'Electron'
+        Hash32 = '5bd97fab4b452d85a5a6527b2c5a55b297a40af4e73dcadbb84f7db0d9cb3430'
+        Hash48 = 'c6c5eb2cb723d4b10758bada7c286a13f962c70c021478ae1ede727fd42c944d'
+    }
+)
+
+function Test-UsefulEmbeddedExeIcon {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $bitmap32 = $null
+    $bitmap48 = $null
+
+    try {
+        $bitmap32 = Get-EmbeddedExeIconBitmap -Path $Path -Size 32
+        if (-not $bitmap32) {
+            return $false
+        }
+
+        $bitmap48 = Get-EmbeddedExeIconBitmap -Path $Path -Size 48
+        if (-not $bitmap48) {
+            return $true
+        }
+
+        $hash32 = Get-NormalizedBitmapHash $bitmap32
+        $hash48 = Get-NormalizedBitmapHash $bitmap48
+
+        foreach ($signature in $genericIconSignatures) {
+            if ($hash32 -eq $signature.Hash32 -and $hash48 -eq $signature.Hash48) {
+                return $false
+            }
+        }
+
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($bitmap32) { $bitmap32.Dispose() }
+        if ($bitmap48) { $bitmap48.Dispose() }
+    }
+}
+
+function Find-PictureCandidate {
+    param($Executable)
+
+    $directory = [IO.Path]::GetDirectoryName($Executable)
+    $baseName = [IO.Path]::GetFileNameWithoutExtension($Executable)
+
+    $matchingIco = Join-Path $directory "$baseName.ico"
+    if (Test-Path -LiteralPath $matchingIco) {
+        return $matchingIco
+    }
+
+    if (Test-UsefulEmbeddedExeIcon -Path $Executable) {
+        return $Executable
+    }
+
+    foreach ($name in @('app.ico', 'icon.ico', 'logo.ico')) {
+        $candidate = Join-Path $directory $name
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+
+    $icons = @(Get-ChildItem -LiteralPath $directory -Filter *.ico -File -ErrorAction SilentlyContinue)
+    if ($icons.Count -eq 1) {
+        return $icons[0].FullName
+    }
+
+    foreach ($name in @("$baseName.png", 'app.png', 'icon.png', 'logo.png', 'app-icon.png')) {
+        $candidate = Join-Path $directory $name
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+
+    return $Executable
 }
 
 function Resize-RasterBitmap {
@@ -384,18 +552,11 @@ function Get-PictureBitmap {
         [int]$Size = 96
     )
 
-    $extension = [IO.Path]::GetExtension($Path).ToLowerInvariant()
-
-    switch ($extension) {
-        '.ico' {
-            return Get-IcoBitmap -Path $Path -Size $Size
-        }
-        '.exe' {
-            return Get-ExeIconBitmap -Path $Path -Size $Size
-        }
+    switch ([IO.Path]::GetExtension($Path).ToLowerInvariant()) {
+        '.ico' { return Get-IcoBitmap -Path $Path -Size $Size }
+        '.exe' { return Get-ExeIconBitmap -Path $Path -Size $Size }
         default {
             $image = [Drawing.Image]::FromFile($Path)
-
             try {
                 return Resize-RasterBitmap -Image $image -Size $Size
             }
@@ -421,7 +582,6 @@ function Install-AccountPicture {
 
     foreach ($size in 32, 40, 48, 96, 192, 240, 448) {
         $bitmap = Get-PictureBitmap -Path $Source -Size $size
-
         try {
             $filename = Join-Path $pictureDir "Image$size.png"
             $bitmap.Save($filename, [Drawing.Imaging.ImageFormat]::Png)
@@ -431,12 +591,14 @@ function Install-AccountPicture {
             $bitmap.Dispose()
         }
     }
+
+    Protect-RestrictedShellStorage
 }
 
 $form = [Windows.Forms.Form]@{
     Text = 'Restricted Account Configurator'
     Width = 700
-    Height = 610
+    Height = 720
     StartPosition = 'CenterScreen'
     FormBorderStyle = 'FixedDialog'
     MaximizeBox = $false
@@ -450,9 +612,8 @@ function Add-Label {
         Text = $Text
         Left = $X
         Top = $Y
-        Width = 130
+        Width = 135
     }
-
     $form.Controls.Add($control)
 }
 
@@ -464,15 +625,13 @@ function Add-TextBox {
         Top = $Y
         Width = $Width
     }
-
     $form.Controls.Add($control)
     return $control
 }
 
 Add-Label 'Windows account:' 20 25
-
 $accountCombo = [Windows.Forms.ComboBox]@{
-    Left = 155
+    Left = 160
     Top = 22
     Width = 300
     DropDownStyle = 'DropDownList'
@@ -480,24 +639,25 @@ $accountCombo = [Windows.Forms.ComboBox]@{
 $form.Controls.Add($accountCombo)
 
 Add-Label 'Target application:' 20 68
-$appTextBox = Add-TextBox 155 65 410
-
-$browseButton = [Windows.Forms.Button]@{
-    Text = 'Browse...'
-    Left = 575
-    Top = 63
-    Width = 85
-}
+$appTextBox = Add-TextBox 160 65 405
+$browseButton = [Windows.Forms.Button]@{ Text = 'Browse...'; Left = 575; Top = 63; Width = 85 }
 $form.Controls.Add($browseButton)
 
 Add-Label 'Arguments:' 20 105
-$argumentsTextBox = Add-TextBox 155 102 505
+$argumentsTextBox = Add-TextBox 160 102 500
 
-Add-Label 'Account picture:' 20 150
+Add-Label 'Pre-run program/script:' 20 142
+$preRunTextBox = Add-TextBox 160 139 405
+$preRunBrowseButton = [Windows.Forms.Button]@{ Text = 'Browse...'; Left = 575; Top = 137; Width = 85 }
+$form.Controls.Add($preRunBrowseButton)
 
+Add-Label 'Pre-run arguments:' 20 179
+$preRunArgumentsTextBox = Add-TextBox 160 176 500
+
+Add-Label 'Account picture:' 20 224
 $pictureBox = [Windows.Forms.PictureBox]@{
-    Left = 155
-    Top = 145
+    Left = 160
+    Top = 219
     Width = 96
     Height = 96
     BorderStyle = 'FixedSingle'
@@ -505,113 +665,44 @@ $pictureBox = [Windows.Forms.PictureBox]@{
 }
 $form.Controls.Add($pictureBox)
 
-$picturePathTextBox = Add-TextBox 270 147 390
+$picturePathTextBox = Add-TextBox 275 221 385
 $picturePathTextBox.ReadOnly = $true
-
-$choosePictureButton = [Windows.Forms.Button]@{
-    Text = 'Choose picture...'
-    Left = 270
-    Top = 182
-    Width = 130
-}
-
-$autoPictureButton = [Windows.Forms.Button]@{
-    Text = 'Auto-select'
-    Left = 410
-    Top = 182
-    Width = 100
-}
-
+$choosePictureButton = [Windows.Forms.Button]@{ Text = 'Choose picture...'; Left = 275; Top = 256; Width = 130 }
+$autoPictureButton = [Windows.Forms.Button]@{ Text = 'Auto-select'; Left = 415; Top = 256; Width = 100 }
 $form.Controls.AddRange(@($choosePictureButton, $autoPictureButton))
 
-$disableTaskManager = [Windows.Forms.CheckBox]@{
-    Text = 'Disable Task Manager'
-    Left = 155
-    Top = 270
-    Width = 250
-    Checked = $true
-}
-
-$preventPasswordChange = [Windows.Forms.CheckBox]@{
-    Text = 'User cannot change password'
-    Left = 155
-    Top = 300
-    Width = 260
-    Checked = $true
-}
-
-$passwordNeverExpires = [Windows.Forms.CheckBox]@{
-    Text = 'Password never expires'
-    Left = 155
-    Top = 330
-    Width = 250
-    Checked = $true
-}
-
-$blockShellHotkeys = [Windows.Forms.CheckBox]@{
-    Text = 'Block Windows shell/application-switching hotkeys'
-    Left = 155
-    Top = 360
-    Width = 370
-    Checked = $true
-}
-
-$logoffOnExit = [Windows.Forms.CheckBox]@{
-    Text = 'Log off when target application exits'
-    Left = 155
-    Top = 390
-    Width = 320
-    Checked = $true
-}
-
+$disableTaskManager = [Windows.Forms.CheckBox]@{ Text = 'Disable Task Manager'; Left = 160; Top = 340; Width = 250; Checked = $true }
+$preventPasswordChange = [Windows.Forms.CheckBox]@{ Text = 'User cannot change password'; Left = 160; Top = 370; Width = 260; Checked = $true }
+$passwordNeverExpires = [Windows.Forms.CheckBox]@{ Text = 'Password never expires'; Left = 160; Top = 400; Width = 250; Checked = $true }
+$blockShellHotkeys = [Windows.Forms.CheckBox]@{ Text = 'Block Windows shell/application-switching hotkeys'; Left = 160; Top = 430; Width = 370; Checked = $true }
+$preventChildProcesses = [Windows.Forms.CheckBox]@{ Text = 'Prevent target application from starting child processes'; Left = 160; Top = 460; Width = 390; Checked = $false }
+$logoffOnExit = [Windows.Forms.CheckBox]@{ Text = 'Log off when target application exits'; Left = 160; Top = 490; Width = 320; Checked = $true }
 $form.Controls.AddRange(@(
     $disableTaskManager,
     $preventPasswordChange,
     $passwordNeverExpires,
     $blockShellHotkeys,
+    $preventChildProcesses,
     $logoffOnExit
 ))
 
 $note = [Windows.Forms.Label]@{
     Left = 20
-    Top = 430
+    Top = 530
     Width = 640
-    Height = 55
-    Text = 'First sign into this account normally, configure and test the target application, then sign out. Convert replaces Explorer for the selected account.'
+    Height = 60
+    Text = 'First sign into this account normally, configure and test the target application, then sign out. A pre-run program/script is unrestricted and must exit before the target starts.'
 }
 $form.Controls.Add($note)
 
-$status = [Windows.Forms.Label]@{
-    Left = 20
-    Top = 505
-    Width = 390
-    Height = 40
-    Text = 'Ready.'
-}
-
-$convertButton = [Windows.Forms.Button]@{
-    Text = 'Convert / Update'
-    Left = 420
-    Top = 500
-    Width = 115
-}
-
-$revertButton = [Windows.Forms.Button]@{
-    Text = 'Revert Account'
-    Left = 545
-    Top = 500
-    Width = 115
-}
-
+$status = [Windows.Forms.Label]@{ Left = 20; Top = 620; Width = 390; Height = 40; Text = 'Ready.' }
+$convertButton = [Windows.Forms.Button]@{ Text = 'Convert / Update'; Left = 420; Top = 615; Width = 115 }
+$revertButton = [Windows.Forms.Button]@{ Text = 'Revert Account'; Left = 545; Top = 615; Width = 115 }
 $form.Controls.AddRange(@($status, $convertButton, $revertButton))
 
-$executableDialog = [Windows.Forms.OpenFileDialog]@{
-    Filter = 'Executables|*.exe'
-}
-
-$pictureDialog = [Windows.Forms.OpenFileDialog]@{
-    Filter = 'Pictures/icons/apps|*.ico;*.png;*.jpg;*.jpeg;*.bmp;*.exe|All files|*.*'
-}
+$executableDialog = [Windows.Forms.OpenFileDialog]@{ Filter = 'Executables|*.exe' }
+$preRunDialog = [Windows.Forms.OpenFileDialog]@{ Filter = 'Programs/scripts|*.exe;*.com;*.bat;*.cmd;*.ps1|All files|*.*' }
+$pictureDialog = [Windows.Forms.OpenFileDialog]@{ Filter = 'Pictures/icons/apps|*.ico;*.png;*.jpg;*.jpeg;*.bmp;*.exe|All files|*.*' }
 
 function Set-PicturePreview {
     param($Path)
@@ -645,12 +736,30 @@ function Get-SelectedUser {
     return $null
 }
 
+function Get-IniBoolean {
+    param($Section, $Key, [bool]$Default)
+
+    if ($Section -and $Section.Contains($Key)) {
+        return $Section[$Key] -ne '0'
+    }
+
+    return $Default
+}
+
 function Refresh-AccountState {
     $user = Get-SelectedUser
-
     if (-not $user) {
         return
     }
+
+    $appTextBox.Text = ''
+    $argumentsTextBox.Text = ''
+    $preRunTextBox.Text = ''
+    $preRunArgumentsTextBox.Text = ''
+    $picturePathTextBox.Text = ''
+    $preventChildProcesses.Checked = $false
+    $blockShellHotkeys.Checked = $true
+    $logoffOnExit.Checked = $true
 
     $data = Read-IniFile $ini
     $metadataSection = "Setup:$($user.Name)"
@@ -662,15 +771,30 @@ function Refresh-AccountState {
     )
 
     if ($data.Contains($user.Name)) {
-        $appTextBox.Text = $data[$user.Name].Executable
-        $argumentsTextBox.Text = $data[$user.Name].Arguments
+        $section = $data[$user.Name]
+        $appTextBox.Text = $section.Executable
+        $argumentsTextBox.Text = $section.Arguments
+        $preRunTextBox.Text = $section.PreRunExecutable
+        $preRunArgumentsTextBox.Text = $section.PreRunArguments
+        $preventChildProcesses.Checked = Get-IniBoolean $section 'PreventChildProcesses' $false
+        $blockShellHotkeys.Checked = Get-IniBoolean $section 'BlockShellHotkeys' $true
+        $logoffOnExit.Checked = Get-IniBoolean $section 'LogoffOnExit' $true
     }
 }
+
+$administratorsGroup = Get-LocalGroup -SID 'S-1-5-32-544'
+$administratorSids = @(
+    Get-LocalGroupMember -Group $administratorsGroup.Name -ErrorAction Stop |
+        ForEach-Object { $_.SID.Value }
+)
+$currentSid = $identity.User.Value
 
 $users = Get-LocalUser |
     Where-Object {
         $_.Enabled -and
-        $_.Name -notin @('Administrator', 'Guest', 'DefaultAccount', 'WDAGUtilityAccount')
+        $_.SID.Value -ne $currentSid -and
+        $_.SID.Value -notin $administratorSids -and
+        $_.Name -notin @('Guest', 'DefaultAccount', 'WDAGUtilityAccount')
     } |
     Sort-Object Name
 
@@ -678,10 +802,7 @@ foreach ($user in $users) {
     [void]$accountCombo.Items.Add($user.Name)
 }
 
-$accountCombo.Add_SelectedIndexChanged({
-    Refresh-AccountState
-})
-
+$accountCombo.Add_SelectedIndexChanged({ Refresh-AccountState })
 if ($accountCombo.Items.Count) {
     $accountCombo.SelectedIndex = 0
 }
@@ -693,10 +814,13 @@ $browseButton.Add_Click({
     }
 })
 
-$autoPictureButton.Add_Click({
-    Set-PicturePreview (Find-PictureCandidate $appTextBox.Text)
+$preRunBrowseButton.Add_Click({
+    if ($preRunDialog.ShowDialog() -eq 'OK') {
+        $preRunTextBox.Text = $preRunDialog.FileName
+    }
 })
 
+$autoPictureButton.Add_Click({ Set-PicturePreview (Find-PictureCandidate $appTextBox.Text) })
 $choosePictureButton.Add_Click({
     if ($pictureDialog.ShowDialog() -eq 'OK') {
         Set-PicturePreview $pictureDialog.FileName
@@ -704,6 +828,12 @@ $choosePictureButton.Add_Click({
 })
 
 $convertButton.Add_Click({
+    $originalText = $convertButton.Text
+    $convertButton.Enabled = $false
+    $convertButton.Text = 'Working...'
+    $status.Text = 'Applying restricted account settings...'
+    [Windows.Forms.Application]::DoEvents()
+
     try {
         Install-RestrictedShell
 
@@ -719,6 +849,10 @@ $convertButton.Add_Click({
 
         if (-not (Test-Path -LiteralPath $appTextBox.Text)) {
             throw 'Select a valid target executable.'
+        }
+
+        if ($preRunTextBox.Text -and -not (Test-Path -LiteralPath $preRunTextBox.Text)) {
+            throw 'Select a valid pre-run program or script, or leave it blank.'
         }
 
         $data = Read-IniFile $ini
@@ -746,21 +880,11 @@ $convertButton.Add_Click({
             }
 
             New-Item $winlogon -Force | Out-Null
-            New-ItemProperty `
-                $winlogon `
-                -Name 'Shell' `
-                -PropertyType String `
-                -Value ('"' + $shell + '"') `
-                -Force | Out-Null
+            New-ItemProperty $winlogon -Name 'Shell' -PropertyType String -Value ('"' + $shell + '"') -Force | Out-Null
 
             if ($disableTaskManager.Checked) {
                 New-Item $policies -Force | Out-Null
-                New-ItemProperty `
-                    $policies `
-                    -Name 'DisableTaskMgr' `
-                    -PropertyType DWord `
-                    -Value 1 `
-                    -Force | Out-Null
+                New-ItemProperty $policies -Name 'DisableTaskMgr' -PropertyType DWord -Value 1 -Force | Out-Null
             }
             else {
                 Remove-ItemProperty $policies -Name 'DisableTaskMgr' -ErrorAction SilentlyContinue
@@ -778,6 +902,9 @@ $convertButton.Add_Click({
 
         Set-IniValue $data $user.Name 'Executable' $appTextBox.Text
         Set-IniValue $data $user.Name 'Arguments' $argumentsTextBox.Text
+        Set-IniValue $data $user.Name 'PreRunExecutable' $preRunTextBox.Text
+        Set-IniValue $data $user.Name 'PreRunArguments' $preRunArgumentsTextBox.Text
+        Set-IniValue $data $user.Name 'PreventChildProcesses' ([int]$preventChildProcesses.Checked)
         Set-IniValue $data $user.Name 'LogoffOnExit' ([int]$logoffOnExit.Checked)
         Set-IniValue $data $user.Name 'BlockShellHotkeys' ([int]$blockShellHotkeys.Checked)
         Set-IniValue $data $metadataSection 'Converted' 1
@@ -788,10 +915,21 @@ $convertButton.Add_Click({
     }
     catch {
         [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Conversion failed') | Out-Null
+        $status.Text = 'Conversion failed.'
+    }
+    finally {
+        $convertButton.Text = $originalText
+        $convertButton.Enabled = $true
     }
 })
 
 $revertButton.Add_Click({
+    $originalText = $revertButton.Text
+    $revertButton.Enabled = $false
+    $revertButton.Text = 'Working...'
+    $status.Text = 'Reverting account settings...'
+    [Windows.Forms.Application]::DoEvents()
+
     try {
         $user = Get-SelectedUser
         if (-not $user) {
@@ -837,6 +975,11 @@ $revertButton.Add_Click({
     }
     catch {
         [Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Revert failed') | Out-Null
+        $status.Text = 'Revert failed.'
+    }
+    finally {
+        $revertButton.Text = $originalText
+        Refresh-AccountState
     }
 })
 
