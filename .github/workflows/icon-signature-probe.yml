@@ -1,0 +1,40 @@
+name: Icon signature probe
+
+on:
+  push:
+    branches: [icon-signature-probe]
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - name: Compute canonical generic icon hashes
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          $items = @(
+            @{ Name='pyinstaller-console'; Url='https://raw.githubusercontent.com/pyinstaller/pyinstaller/develop/PyInstaller/bootloader/images/icon-console.ico' },
+            @{ Name='pyinstaller-windowed'; Url='https://raw.githubusercontent.com/pyinstaller/pyinstaller/develop/PyInstaller/bootloader/images/icon-windowed.ico' },
+            @{ Name='electron'; Url='https://raw.githubusercontent.com/electron/electron/main/shell/browser/resources/win/electron.ico' }
+          )
+          foreach ($item in $items) {
+            $path = Join-Path $env:RUNNER_TEMP ($item.Name + '.ico')
+            Invoke-WebRequest $item.Url -OutFile $path
+            foreach ($size in 32,48,96,256) {
+              $icon = [Drawing.Icon]::new($path,$size,$size)
+              try {
+                $bmp = $icon.ToBitmap()
+                try {
+                  $rect = [Drawing.Rectangle]::new(0,0,$size,$size)
+                  $data = $bmp.LockBits($rect,[Drawing.Imaging.ImageLockMode]::ReadOnly,[Drawing.Imaging.PixelFormat]::Format32bppArgb)
+                  try {
+                    $bytes = New-Object byte[] ($size*$size*4)
+                    [Runtime.InteropServices.Marshal]::Copy($data.Scan0,$bytes,0,$bytes.Length)
+                  } finally { $bmp.UnlockBits($data) }
+                  $sha = [Security.Cryptography.SHA256]::Create()
+                  try { $hash = ($sha.ComputeHash($bytes) | ForEach-Object ToString x2) -join '' } finally { $sha.Dispose() }
+                  Write-Host "SIGNATURE $($item.Name) $size $hash"
+                } finally { $bmp.Dispose() }
+              } finally { $icon.Dispose() }
+            }
+          }
