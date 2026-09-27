@@ -430,9 +430,13 @@ static BOOL prerun()
 
     HANDLE p=0;
     if(!startproc(app,cmd,wd,FALSE,&p))return FALSE;
-    WaitForSingleObject(p,INFINITE);
+
+    DWORD exitCode=1;
+    DWORD waitResult=WaitForSingleObject(p,INFINITE);
+    BOOL ok=waitResult==WAIT_OBJECT_0&&
+        GetExitCodeProcess(p,&exitCode)&&exitCode==0;
     CloseHandle(p);
-    return TRUE;
+    return ok;
 }
 
 static BOOL launch(const WCHAR*e)
@@ -504,7 +508,7 @@ extern "C" void WINAPI entry()
     }
 
     if(!prerun()){
-        MessageBoxW(0,L"Could not launch the configured pre-run program.",
+        MessageBoxW(0,L"The configured pre-run program failed or returned an error.",
             L"Restricted Shell",MB_ICONERROR);
         ExitProcess(4);
     }
