@@ -28,6 +28,8 @@ static HHOOK hk;
 static HANDLE child;
 static HWND mw,ow;
 static UINT shellHookMessage;
+static MINIMIZEDMETRICS originalMinimizedMetrics;
+static BOOL minimizedMetricsChanged=FALSE;
 static IMMDeviceEnumerator* de;
 static IAudioEndpointVolume *out,*mic;
 static WCHAR ot[32],ov[32];
@@ -250,6 +252,35 @@ static LRESULT CALLBACK keyproc(int n,WPARAM w,LPARAM l)
     return CallNextHookEx(hk,n,w,l);
 }
 
+static void restoreshellmetrics()
+{
+    if(minimizedMetricsChanged){
+        SystemParametersInfoW(SPI_SETMINIMIZEDMETRICS,
+            sizeof(originalMinimizedMetrics),&originalMinimizedMetrics,0);
+        minimizedMetricsChanged=FALSE;
+    }
+}
+
+static void enableshellhook()
+{
+    MINIMIZEDMETRICS mm;
+    memset(&mm,0,sizeof(mm));
+    mm.cbSize=sizeof(mm);
+
+    memset(&originalMinimizedMetrics,0,sizeof(originalMinimizedMetrics));
+    originalMinimizedMetrics.cbSize=sizeof(originalMinimizedMetrics);
+
+    if(SystemParametersInfoW(SPI_GETMINIMIZEDMETRICS,sizeof(mm),&mm,0)){
+        originalMinimizedMetrics=mm;
+        mm.iArrange|=ARW_HIDE;
+        minimizedMetricsChanged=SystemParametersInfoW(
+            SPI_SETMINIMIZEDMETRICS,sizeof(mm),&mm,0);
+    }
+
+    shellHookMessage=RegisterWindowMessageW(L"SHELLHOOK");
+    RegisterShellHookWindow(mw);
+}
+
 static LRESULT CALLBACK osdproc(HWND h,UINT m,WPARAM w,LPARAM l)
 {
     if(m==WM_TIMER&&w==T_OSD){
@@ -307,6 +338,11 @@ static LRESULT CALLBACK msgproc(HWND h,UINT m,WPARAM w,LPARAM l)
             micmute();
             return TRUE;
         }
+    }
+
+    if(m==WM_ENDSESSION&&w){
+        restoreshellmetrics();
+        return 0;
     }
 
     if(m==WM_TIMER&&w==T_PROCESS&&child&&
@@ -529,9 +565,6 @@ extern "C" void WINAPI entry()
         WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,
         L"RSO",L"",WS_POPUP,0,0,360,104,0,0,i,0);
 
-    shellHookMessage=RegisterWindowMessageW(L"SHELLHOOK");
-    RegisterShellHookWindow(mw);
-
     audioinit();
 
     hk=SetWindowsHookExW(WH_KEYBOARD_LL,keyproc,i,0);
@@ -547,11 +580,14 @@ extern "C" void WINAPI entry()
         ExitProcess(4);
     }
 
+    enableshellhook();
+
     WCHAR exe[MAX_PATH];
     exe[0]=0;
     getconfig(L"Executable",L"",exe,MAX_PATH);
 
     if(!exe[0]||!launch(exe)){
+        restoreshellmetrics();
         MessageBoxW(0,
             L"Could not launch Executable in RestrictedShell.ini.",
             L"Restricted Shell",MB_ICONERROR);
@@ -566,5 +602,7 @@ extern "C" void WINAPI entry()
         DispatchMessageW(&m);
     }
 
+    DeregisterShellHookWindow(mw);
+    restoreshellmetrics();
     ExitProcess((UINT)m.wParam);
 }
