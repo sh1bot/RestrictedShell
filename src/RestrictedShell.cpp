@@ -7,7 +7,7 @@
 #pragma comment(lib,"advapi32.lib")
 
 #ifndef PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY
-#define PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY ProcThreadAttributeValue(14,FALSE,TRUE,FALSE)
+#define PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY ((DWORD_PTR)0x0002000E)
 #endif
 #ifndef PROCESS_CREATION_CHILD_PROCESS_RESTRICTED
 #define PROCESS_CREATION_CHILD_PROCESS_RESTRICTED 0x01
@@ -22,8 +22,6 @@ extern "C" void* memset(void* dst, int value, size_t count)
 }
 #pragma optimize("", on)
 
-/* MSVC emits a reference to this marker whenever floating point is used.
-   Core Audio's scalar volume interface uses float; no FP runtime is needed. */
 extern "C" int _fltused=0;
 
 static HHOOK hk;
@@ -33,10 +31,9 @@ static IMMDeviceEnumerator* de;
 static IAudioEndpointVolume *out,*mic;
 static WCHAR ot[32],ov[32];
 
-/* Large command-line scratch storage is static deliberately:
-   avoids stack probing (__chkstk) without adding 64 KiB of initialized
-   data to the on-disk PE image. */
 static WCHAR argsbuf[32768];
+static WCHAR preargsbuf[32768];
+static WCHAR precmd[32768];
 static BOOL logoffOnExit=TRUE;
 static BOOL blockShellHotkeys=TRUE;
 static BOOL preventChildProcesses=FALSE;
@@ -52,6 +49,44 @@ static void cp(WCHAR*d,const WCHAR*s,int n)
     if(!n)return;
     while(--n&&(*d++=*s++));
     *d=0;
+}
+
+static BOOL ap(WCHAR*d,int n,const WCHAR*s)
+{
+    int i=0;
+    while(i<n&&d[i])i++;
+    if(i>=n)return FALSE;
+    while(*s){
+        if(i+1>=n)return FALSE;
+        d[i++]=*s++;
+    }
+    d[i]=0;
+    return TRUE;
+}
+
+static WCHAR lc(WCHAR c)
+{
+    return(c>=L'A'&&c<=L'Z')?(WCHAR)(c+(L'a'-L'A')):c;
+}
+
+static BOOL endsi(const WCHAR*s,const WCHAR*t)
+{
+    int a=0,b=0;
+    while(s[a])a++;
+    while(t[b])b++;
+    if(b>a)return FALSE;
+    for(int i=0;i<b;i++)
+        if(lc(s[a-b+i])!=lc(t[i]))return FALSE;
+    return TRUE;
+}
+
+static void workdir(const WCHAR*e,WCHAR*wd)
+{
+    cp(wd,e,MAX_PATH);
+    WCHAR*x=0;
+    for(WCHAR*q=wd;*q;q++)
+        if(*q==L'\\'||*q==L'/')x=q;
+    if(x)*x=0;else wd[0]=0;
 }
 
 static void show(const WCHAR*t,const WCHAR*v)
@@ -183,13 +218,8 @@ static LRESULT CALLBACK keyproc(int n,WPARAM w,LPARAM l)
         if(v==VK_VOLUME_UP){volume(.05f);return 1;}
         if(v==VK_VOLUME_DOWN){volume(-.05f);return 1;}
         if(v==VK_VOLUME_MUTE){outmute();return 1;}
-
         if(win&&alt&&v=='K'){micmute();return 1;}
-
-        if(win&&v=='L'){
-            LockWorkStation();
-            return 1;
-        }
+        if(win&&v=='L'){LockWorkStation();return 1;}
 
         if(blockShellHotkeys){
             if(win&&blockedwin(v))return 1;
@@ -200,8 +230,6 @@ static LRESULT CALLBACK keyproc(int n,WPARAM w,LPARAM l)
     }
 
     if(blockShellHotkeys&&(v==VK_LWIN||v==VK_RWIN))return 1;
-
-    /* Ctrl+Alt+Del is intentionally untouched. */
     return CallNextHookEx(hk,n,w,l);
 }
 
@@ -302,29 +330,19 @@ static void getconfig(const WCHAR*key,const WCHAR*fallback,
         cp(outbuf,base,(int)outchars);
 }
 
-static BOOL launch(const WCHAR*e)
+static BOOL startproc(const WCHAR*app,WCHAR*cmd,const WCHAR*wd,
+    BOOL restrictChildren,HANDLE*outProcess)
 {
-    argsbuf[0]=0;
-    getconfig(L"Arguments",L"",argsbuf,32768);
-
     PROCESS_INFORMATION p;
     memset(&p,0,sizeof(p));
 
-    WCHAR wd[MAX_PATH];
-    cp(wd,e,MAX_PATH);
-    WCHAR*x=0;
-    for(WCHAR*q=wd;*q;q++)
-        if(*q==L'\\'||*q==L'/')x=q;
-    if(x)*x=0;else wd[0]=0;
-
-    if(!preventChildProcesses){
+    BOOL ok=FALSE;
+    if(!restrictChildren){
         STARTUPINFOW s;
         memset(&s,0,sizeof(s));
         s.cb=sizeof(s);
-
-        if(!CreateProcessW(e,argsbuf[0]?argsbuf:0,0,0,FALSE,0,0,
-            wd[0]?wd:0,&s,&p))
-            return FALSE;
+        ok=CreateProcessW(app,cmd&&cmd[0]?cmd:0,0,0,FALSE,0,0,
+            wd&&wd[0]?wd:0,&s,&p);
     } else {
         SIZE_T bytes=0;
         InitializeProcThreadAttributeList(0,1,0,&bytes);
@@ -340,26 +358,83 @@ static BOOL launch(const WCHAR*e)
         sx.StartupInfo.cb=sizeof(sx);
         sx.lpAttributeList=attrs;
 
-        BOOL ok=FALSE;
         if(InitializeProcThreadAttributeList(attrs,1,0,&bytes)){
             DWORD policy=PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
             if(UpdateProcThreadAttribute(
                 attrs,0,PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
                 &policy,sizeof(policy),0,0)){
                 ok=CreateProcessW(
-                    e,argsbuf[0]?argsbuf:0,0,0,FALSE,
+                    app,cmd&&cmd[0]?cmd:0,0,0,FALSE,
                     EXTENDED_STARTUPINFO_PRESENT,0,
-                    wd[0]?wd:0,&sx.StartupInfo,&p);
+                    wd&&wd[0]?wd:0,&sx.StartupInfo,&p);
             }
             DeleteProcThreadAttributeList(attrs);
         }
         HeapFree(GetProcessHeap(),0,attrs);
-        if(!ok)return FALSE;
     }
 
+    if(!ok)return FALSE;
     CloseHandle(p.hThread);
-    child=p.hProcess;
+    *outProcess=p.hProcess;
     return TRUE;
+}
+
+static BOOL prerun()
+{
+    WCHAR pre[MAX_PATH];
+    pre[0]=0;
+    getconfig(L"PreRunExecutable",L"",pre,MAX_PATH);
+    if(!pre[0])return TRUE;
+
+    preargsbuf[0]=0;
+    getconfig(L"PreRunArguments",L"",preargsbuf,32768);
+
+    WCHAR app[MAX_PATH];
+    WCHAR wd[MAX_PATH];
+    workdir(pre,wd);
+    cp(app,pre,MAX_PATH);
+    WCHAR*cmd=preargsbuf;
+
+    if(endsi(pre,L".bat")||endsi(pre,L".cmd")){
+        DWORD n=GetEnvironmentVariableW(L"ComSpec",app,MAX_PATH);
+        if(!n||n>=MAX_PATH)return FALSE;
+        precmd[0]=0;
+        if(!ap(precmd,32768,L"/d /s /c \"\"")||
+           !ap(precmd,32768,pre)||
+           !ap(precmd,32768,L"\"")||
+           (preargsbuf[0]&&(!ap(precmd,32768,L" ")||
+                            !ap(precmd,32768,preargsbuf)))||
+           !ap(precmd,32768,L"\""))return FALSE;
+        cmd=precmd;
+    } else if(endsi(pre,L".ps1")){
+        DWORD n=GetWindowsDirectoryW(app,MAX_PATH);
+        if(!n||n>=MAX_PATH)return FALSE;
+        if(!ap(app,MAX_PATH,L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"))
+            return FALSE;
+        precmd[0]=0;
+        if(!ap(precmd,32768,L"-NoProfile -ExecutionPolicy Bypass -File \"")||
+           !ap(precmd,32768,pre)||
+           !ap(precmd,32768,L"\"")||
+           (preargsbuf[0]&&(!ap(precmd,32768,L" ")||
+                            !ap(precmd,32768,preargsbuf))))return FALSE;
+        cmd=precmd;
+    }
+
+    HANDLE p=0;
+    if(!startproc(app,cmd,wd,FALSE,&p))return FALSE;
+    WaitForSingleObject(p,INFINITE);
+    CloseHandle(p);
+    return TRUE;
+}
+
+static BOOL launch(const WCHAR*e)
+{
+    argsbuf[0]=0;
+    getconfig(L"Arguments",L"",argsbuf,32768);
+
+    WCHAR wd[MAX_PATH];
+    workdir(e,wd);
+    return startproc(e,argsbuf,wd,preventChildProcesses,&child);
 }
 
 extern "C" void WINAPI entry()
@@ -408,6 +483,19 @@ extern "C" void WINAPI entry()
 
     audioinit();
 
+    hk=SetWindowsHookExW(WH_KEYBOARD_LL,keyproc,i,0);
+    if(!hk){
+        MessageBoxW(0,L"Could not install keyboard hook.",
+            L"Restricted Shell",MB_ICONERROR);
+        ExitProcess(3);
+    }
+
+    if(!prerun()){
+        MessageBoxW(0,L"Could not launch the configured pre-run program.",
+            L"Restricted Shell",MB_ICONERROR);
+        ExitProcess(4);
+    }
+
     WCHAR exe[MAX_PATH];
     exe[0]=0;
     getconfig(L"Executable",L"",exe,MAX_PATH);
@@ -417,13 +505,6 @@ extern "C" void WINAPI entry()
             L"Could not launch Executable in RestrictedShell.ini.",
             L"Restricted Shell",MB_ICONERROR);
         ExitProcess(2);
-    }
-
-    hk=SetWindowsHookExW(WH_KEYBOARD_LL,keyproc,i,0);
-    if(!hk){
-        MessageBoxW(0,L"Could not install keyboard hook.",
-            L"Restricted Shell",MB_ICONERROR);
-        ExitProcess(3);
     }
 
     SetTimer(mw,T_PROCESS,500,0);
