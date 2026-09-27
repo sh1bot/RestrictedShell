@@ -10,22 +10,28 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix:
-        arch: [x86, x64, arm64]
+        include:
+          - output: x86
+            vcvars: x64_x86
+          - output: x64
+            vcvars: x64
+          - output: arm64
+            vcvars: x64_arm64
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: ${{ matrix.arch }}
+          arch: ${{ matrix.vcvars }}
       - name: Build
         shell: cmd
         run: |
-          if not exist "bin\${{ matrix.arch }}" mkdir "bin\${{ matrix.arch }}"
+          if not exist "bin\${{ matrix.output }}" mkdir "bin\${{ matrix.output }}"
           cd src
-          call build-one.bat ${{ matrix.arch }} "..\bin\${{ matrix.arch }}\RestrictedShell.exe"
+          call build-one.bat ${{ matrix.output }} "..\bin\${{ matrix.output }}\RestrictedShell.exe"
       - uses: actions/upload-artifact@v4
         with:
-          name: RestrictedShell-${{ matrix.arch }}
-          path: bin/${{ matrix.arch }}/RestrictedShell.exe
+          name: RestrictedShell-${{ matrix.output }}
+          path: bin/${{ matrix.output }}/RestrictedShell.exe
 
   package:
     needs: build
