@@ -12,29 +12,48 @@ jobs:
         shell: pwsh
         run: |
           Add-Type -AssemblyName System.Drawing
+
+          function Get-NormalizedIconHash([string]$Path, [int]$Size) {
+            $icon = [Drawing.Icon]::new($Path, $Size, $Size)
+            try {
+              $bmp = $icon.ToBitmap()
+              try {
+                $bytes = New-Object byte[] ($bmp.Width * $bmp.Height * 4)
+                $i = 0
+                for ($y = 0; $y -lt $bmp.Height; $y++) {
+                  for ($x = 0; $x -lt $bmp.Width; $x++) {
+                    $p = $bmp.GetPixel($x, $y)
+                    $bytes[$i++] = $p.A
+                    $bytes[$i++] = $p.R
+                    $bytes[$i++] = $p.G
+                    $bytes[$i++] = $p.B
+                  }
+                }
+                $sha = [Security.Cryptography.SHA256]::Create()
+                try { return ($sha.ComputeHash($bytes) | ForEach-Object ToString x2) -join '' }
+                finally { $sha.Dispose() }
+              }
+              finally { $bmp.Dispose() }
+            }
+            finally { $icon.Dispose() }
+          }
+
           $items = @(
             @{ Name='pyinstaller-console'; Url='https://raw.githubusercontent.com/pyinstaller/pyinstaller/develop/PyInstaller/bootloader/images/icon-console.ico' },
             @{ Name='pyinstaller-windowed'; Url='https://raw.githubusercontent.com/pyinstaller/pyinstaller/develop/PyInstaller/bootloader/images/icon-windowed.ico' },
             @{ Name='electron'; Url='https://raw.githubusercontent.com/electron/electron/main/shell/browser/resources/win/electron.ico' }
           )
+
           foreach ($item in $items) {
-            $path = Join-Path $env:RUNNER_TEMP ($item.Name + '.ico')
-            Invoke-WebRequest $item.Url -OutFile $path
-            foreach ($size in 32,48,96,256) {
-              $icon = [Drawing.Icon]::new($path,$size,$size)
-              try {
-                $bmp = $icon.ToBitmap()
-                try {
-                  $rect = [Drawing.Rectangle]::new(0,0,$size,$size)
-                  $data = $bmp.LockBits($rect,[Drawing.Imaging.ImageLockMode]::ReadOnly,[Drawing.Imaging.PixelFormat]::Format32bppArgb)
-                  try {
-                    $bytes = New-Object byte[] ($size*$size*4)
-                    [Runtime.InteropServices.Marshal]::Copy($data.Scan0,$bytes,0,$bytes.Length)
-                  } finally { $bmp.UnlockBits($data) }
-                  $sha = [Security.Cryptography.SHA256]::Create()
-                  try { $hash = ($sha.ComputeHash($bytes) | ForEach-Object ToString x2) -join '' } finally { $sha.Dispose() }
-                  Write-Host "SIGNATURE $($item.Name) $size $hash"
-                } finally { $bmp.Dispose() }
-              } finally { $icon.Dispose() }
+            try {
+              $path = Join-Path $env:RUNNER_TEMP ($item.Name + '.ico')
+              Invoke-WebRequest $item.Url -OutFile $path
+              foreach ($size in 32,48) {
+                $hash = Get-NormalizedIconHash $path $size
+                Write-Host "SIGNATURE $($item.Name) $size $hash"
+              }
+            }
+            catch {
+              Write-Host "SIGNATURE-ERROR $($item.Name): $($_.Exception.Message)"
             }
           }
