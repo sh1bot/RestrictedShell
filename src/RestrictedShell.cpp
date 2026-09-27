@@ -6,6 +6,13 @@
 #include <endpointvolume.h>
 #pragma comment(lib,"advapi32.lib")
 
+#ifndef PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY
+#define PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY ProcThreadAttributeValue(14,FALSE,TRUE,FALSE)
+#endif
+#ifndef PROCESS_CREATION_CHILD_PROCESS_RESTRICTED
+#define PROCESS_CREATION_CHILD_PROCESS_RESTRICTED 0x01
+#endif
+
 #pragma optimize("", off)
 extern "C" void* memset(void* dst, int value, size_t count)
 {
@@ -32,6 +39,7 @@ static WCHAR ot[32],ov[32];
 static WCHAR argsbuf[32768];
 static BOOL logoffOnExit=TRUE;
 static BOOL blockShellHotkeys=TRUE;
+static BOOL preventChildProcesses=FALSE;
 static WCHAR inipath[MAX_PATH];
 static WCHAR username[256];
 
@@ -299,11 +307,8 @@ static BOOL launch(const WCHAR*e)
     argsbuf[0]=0;
     getconfig(L"Arguments",L"",argsbuf,32768);
 
-    STARTUPINFOW s;
     PROCESS_INFORMATION p;
-    memset(&s,0,sizeof(s));
     memset(&p,0,sizeof(p));
-    s.cb=sizeof(s);
 
     WCHAR wd[MAX_PATH];
     cp(wd,e,MAX_PATH);
@@ -312,9 +317,45 @@ static BOOL launch(const WCHAR*e)
         if(*q==L'\\'||*q==L'/')x=q;
     if(x)*x=0;else wd[0]=0;
 
-    if(!CreateProcessW(e,argsbuf[0]?argsbuf:0,0,0,FALSE,0,0,
-        wd[0]?wd:0,&s,&p))
-        return FALSE;
+    if(!preventChildProcesses){
+        STARTUPINFOW s;
+        memset(&s,0,sizeof(s));
+        s.cb=sizeof(s);
+
+        if(!CreateProcessW(e,argsbuf[0]?argsbuf:0,0,0,FALSE,0,0,
+            wd[0]?wd:0,&s,&p))
+            return FALSE;
+    } else {
+        SIZE_T bytes=0;
+        InitializeProcThreadAttributeList(0,1,0,&bytes);
+        if(!bytes)return FALSE;
+
+        LPPROC_THREAD_ATTRIBUTE_LIST attrs=
+            (LPPROC_THREAD_ATTRIBUTE_LIST)HeapAlloc(
+                GetProcessHeap(),0,bytes);
+        if(!attrs)return FALSE;
+
+        STARTUPINFOEXW sx;
+        memset(&sx,0,sizeof(sx));
+        sx.StartupInfo.cb=sizeof(sx);
+        sx.lpAttributeList=attrs;
+
+        BOOL ok=FALSE;
+        if(InitializeProcThreadAttributeList(attrs,1,0,&bytes)){
+            DWORD policy=PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
+            if(UpdateProcThreadAttribute(
+                attrs,0,PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
+                &policy,sizeof(policy),0,0)){
+                ok=CreateProcessW(
+                    e,argsbuf[0]?argsbuf:0,0,0,FALSE,
+                    EXTENDED_STARTUPINFO_PRESENT,0,
+                    wd[0]?wd:0,&sx.StartupInfo,&p);
+            }
+            DeleteProcThreadAttributeList(attrs);
+        }
+        HeapFree(GetProcessHeap(),0,attrs);
+        if(!ok)return FALSE;
+    }
 
     CloseHandle(p.hThread);
     child=p.hProcess;
@@ -340,6 +381,10 @@ extern "C" void WINAPI entry()
     WCHAR blockValue[16];
     getconfig(L"BlockShellHotkeys",L"1",blockValue,16);
     blockShellHotkeys = !(blockValue[0]==L'0' && blockValue[1]==0);
+
+    WCHAR childValue[16];
+    getconfig(L"PreventChildProcesses",L"0",childValue,16);
+    preventChildProcesses = !(childValue[0]==L'0' && childValue[1]==0);
 
     WNDCLASSW a,b;
     memset(&a,0,sizeof(a));
