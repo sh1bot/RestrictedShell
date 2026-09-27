@@ -755,7 +755,7 @@ $revertButton = [Windows.Forms.Button]@{ Text = 'Revert Account'; Left = 545; To
 $form.Controls.AddRange(@($status, $convertButton, $revertButton))
 
 $executableDialog = [Windows.Forms.OpenFileDialog]@{ Filter = 'Executables|*.exe' }
-$preRunDialog = [Windows.Forms.OpenFileDialog]@{ Filter = 'Programs/scripts|*.exe;*.com;*.bat;*.cmd;*.ps1|All files|*.*' }
+$preRunDialog = [Windows.Forms.OpenFileDialog]@{ Filter = 'Programs/scripts|*.exe;*.com;*.bat;*.cmd;*.ps1;*.py;*.pyw|All files|*.*' }
 $pictureDialog = [Windows.Forms.OpenFileDialog]@{ Filter = 'Pictures/icons/apps|*.ico;*.png;*.jpg;*.jpeg;*.bmp;*.exe|All files|*.*' }
 
 function Set-PicturePreview {
