@@ -56,6 +56,33 @@ $here = Split-Path -Parent $PSCommandPath
 $installDir = Join-Path $env:ProgramData 'RestrictedShell'
 $ini = Join-Path $installDir 'RestrictedShell.ini'
 $shell = Join-Path $installDir 'RestrictedShell.exe'
+$installedScriptsDir = Join-Path $installDir 'scripts'
+
+function New-RestrictedFileAcl {
+    $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $administratorsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $usersSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+
+    $fileAcl = [Security.AccessControl.FileSecurity]::new()
+    $fileAcl.SetAccessRuleProtection($true, $false)
+    $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $systemSid,
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        [Security.AccessControl.AccessControlType]::Allow
+    ))
+    $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $administratorsSid,
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        [Security.AccessControl.AccessControlType]::Allow
+    ))
+    $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $usersSid,
+        [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+        [Security.AccessControl.AccessControlType]::Allow
+    ))
+
+    return $fileAcl
+}
 
 function Protect-RestrictedShellStorage {
     if (-not (Test-Path -LiteralPath $installDir)) {
@@ -93,25 +120,16 @@ function Protect-RestrictedShellStorage {
     ))
     Set-Acl -LiteralPath $installDir -AclObject $directoryAcl
 
-    if (Test-Path -LiteralPath $ini) {
-        $fileAcl = [Security.AccessControl.FileSecurity]::new()
-        $fileAcl.SetAccessRuleProtection($true, $false)
-        $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-            $systemSid,
-            [Security.AccessControl.FileSystemRights]::FullControl,
-            [Security.AccessControl.AccessControlType]::Allow
-        ))
-        $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-            $administratorsSid,
-            [Security.AccessControl.FileSystemRights]::FullControl,
-            [Security.AccessControl.AccessControlType]::Allow
-        ))
-        $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-            $usersSid,
-            [Security.AccessControl.FileSystemRights]::ReadAndExecute,
-            [Security.AccessControl.AccessControlType]::Allow
-        ))
-        Set-Acl -LiteralPath $ini -AclObject $fileAcl
+    foreach ($path in @($ini, $shell)) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            Set-Acl -LiteralPath $path -AclObject (New-RestrictedFileAcl)
+        }
+    }
+
+    if (Test-Path -LiteralPath $installedScriptsDir -PathType Container) {
+        foreach ($file in Get-ChildItem -LiteralPath $installedScriptsDir -File -Recurse) {
+            Set-Acl -LiteralPath $file.FullName -AclObject (New-RestrictedFileAcl)
+        }
     }
 }
 
@@ -138,6 +156,12 @@ function Install-RestrictedShell {
     Protect-RestrictedShellStorage
     Copy-Item -LiteralPath $source -Destination $shell -Force
 
+    $packagedScriptsDir = Join-Path $here 'scripts'
+    if (Test-Path -LiteralPath $packagedScriptsDir -PathType Container) {
+        New-Item -ItemType Directory -Path $installedScriptsDir -Force | Out-Null
+        Copy-Item -Path (Join-Path $packagedScriptsDir '*') -Destination $installedScriptsDir -Recurse -Force
+    }
+
     if (-not (Test-Path -LiteralPath $ini)) {
         $template = Join-Path $here 'RestrictedShell.ini'
 
@@ -153,12 +177,39 @@ PreventChildProcesses=0
 StandardKeyboardVolumeShortcuts=0
 PreRunExecutable=
 PreRunArguments=
+
+[AudioDefaults]
+PublicVolume=10
+PrivateVolume=60
 "@
             [IO.File]::WriteAllText($ini, $defaultIni, [Text.UTF8Encoding]::new($false))
         }
     }
 
     Protect-RestrictedShellStorage
+}
+
+function Resolve-InstalledPreRunPath {
+    param([string]$Path)
+
+    if (-not $Path) {
+        return ''
+    }
+
+    $packagedScriptsDir = Join-Path $here 'scripts'
+    if (-not (Test-Path -LiteralPath $packagedScriptsDir -PathType Container)) {
+        return $Path
+    }
+
+    $sourceRoot = [IO.Path]::GetFullPath($packagedScriptsDir).TrimEnd('\') + '\'
+    $candidate = [IO.Path]::GetFullPath($Path)
+
+    if ($candidate.StartsWith($sourceRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        $relative = $candidate.Substring($sourceRoot.Length)
+        return Join-Path $installedScriptsDir $relative
+    }
+
+    return $Path
 }
 
 function Read-IniFile {
@@ -905,9 +956,14 @@ $convertButton.Add_Click({
             Install-AccountPicture $user.SID.Value $picturePathTextBox.Text
         }
 
+        $storedPreRunPath = Resolve-InstalledPreRunPath $preRunTextBox.Text
+        if ($storedPreRunPath) {
+            $preRunTextBox.Text = $storedPreRunPath
+        }
+
         Set-IniValue $data $user.Name 'Executable' $appTextBox.Text
         Set-IniValue $data $user.Name 'Arguments' $argumentsTextBox.Text
-        Set-IniValue $data $user.Name 'PreRunExecutable' $preRunTextBox.Text
+        Set-IniValue $data $user.Name 'PreRunExecutable' $storedPreRunPath
         Set-IniValue $data $user.Name 'PreRunArguments' $preRunArgumentsTextBox.Text
         Set-IniValue $data $user.Name 'PreventChildProcesses' ([int]$preventChildProcesses.Checked)
         Set-IniValue $data $user.Name 'StandardKeyboardVolumeShortcuts' ([int]$standardKeyboardVolumeShortcuts.Checked)
