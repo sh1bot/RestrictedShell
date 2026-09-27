@@ -14,13 +14,34 @@ The GitHub Actions workflow also builds all three architectures automatically an
 2. Sign into it and configure/test the target application.
 3. Sign out and return to an administrator account.
 4. Run `RestrictedShellSetup.ps1` and select the existing account.
-5. Convert the account. The matching native binary and active INI are installed under `C:\ProgramData\RestrictedShell`.
+5. Convert the account. The matching native binary, active INI, and packaged example scripts are installed under `C:\ProgramData\RestrictedShell`.
 6. `Revert Account` restores the rollback state recorded by the configurator for supported settings.
 
 The selected account picture is installed during conversion; the current revert operation does not restore the previous picture.
 
 ## Configuration
 
-`RestrictedShell.ini` supports global defaults in `[RestrictedShell]` and per-account overrides in `[username]`, including `Executable`, `Arguments`, `LogoffOnExit`, and `BlockShellHotkeys`.
+`RestrictedShell.ini` supports global defaults in `[RestrictedShell]` and per-account overrides in `[username]`, including `Executable`, `Arguments`, `PreRunExecutable`, `PreRunArguments`, `PreventChildProcesses`, `StandardKeyboardVolumeShortcuts`, `LogoffOnExit`, and `BlockShellHotkeys`.
 
 Configurator rollback metadata is stored in `[Setup:username]` sections and is ignored by RestrictedShell.
+
+## Example pre-run scripts
+
+Packaged scripts are installed under `C:\ProgramData\RestrictedShell\scripts` and are intended as examples that can be selected as the optional pre-run program/script.
+
+`InitializeAudioVolumes.ps1` reads the shared INI section:
+
+```ini
+[AudioDefaults]
+PublicVolume=10
+PrivateVolume=60
+```
+
+It enumerates active and unplugged render endpoints, chooses a likely room-audible fallback and a distinct headphone/headset-style private endpoint when available, then presets both before the target application starts. If Windows exposes no distinct public endpoint, it conservatively treats the best available endpoint as public and applies `PublicVolume`.
+
+A typical configured account can use:
+
+```ini
+PreRunExecutable=C:\ProgramData\RestrictedShell\scripts\InitializeAudioVolumes.ps1
+PreRunArguments=
+```
