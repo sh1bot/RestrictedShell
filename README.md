@@ -60,6 +60,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\RestrictedShellSetup.p
 
 The script requests elevation automatically if necessary.
 
+Before the configurator window opens, setup installs or updates the native shell, INI defaults, and bundled scripts under `C:\ProgramData\RestrictedShell`. This means the packaged example scripts are available from the file picker even on the very first run, regardless of where the ZIP was extracted.
+
 Choose the previously prepared account from **Windows account**.
 
 ### Target application
@@ -92,7 +94,7 @@ Packaged example scripts are installed into:
 C:\ProgramData\RestrictedShell\scripts
 ```
 
-and protected against modification by ordinary users.
+and protected against modification by ordinary users. The pre-run file picker opens there by default.
 
 ### Account picture
 
@@ -179,15 +181,14 @@ When everything is configured, click **Convert / Update**.
 
 The button immediately changes to **Working...** and disables itself so there is no need to click it twice.
 
-On a first conversion the configurator performs the safety-sensitive work in this order:
+The runtime and bundled scripts have already been installed by the time the configurator window appears. On a first conversion, the safety-sensitive account changes then happen in this order:
 
-1. install/update RestrictedShell under `C:\ProgramData\RestrictedShell`;
-2. validate the target, pre-run command, and interpreter paths;
-3. record the account's existing shell, Task Manager policy, and password flags;
-4. write the intended RestrictedShell configuration and rollback journal to the protected INI;
-5. install the selected account picture, if any;
-6. change the user's shell and other selected account settings;
-7. mark the conversion complete.
+1. validate the target, pre-run command, and interpreter paths;
+2. record the account's existing shell, Task Manager policy, and password flags;
+3. write the intended RestrictedShell configuration and rollback journal to the protected INI;
+4. install the selected account picture, if any;
+5. change the user's shell and other selected account settings;
+6. mark the conversion complete.
 
 The rollback information is deliberately written **before** the user's shell is changed. INI updates are performed by replacing the file rather than rewriting the live file in place.
 
@@ -235,7 +236,7 @@ Run `RestrictedShellSetup.ps1` again as an administrator, select the account, ch
 
 The original pre-conversion rollback state is retained. Updating an already converted account does not redefine "revert" to mean the previous RestrictedShell configuration; **Revert Account** still means returning to the settings that existed before the first valid conversion.
 
-The setup program also updates the installed native binary and packaged scripts and adds any newly introduced default INI settings that are missing from an older installation.
+Opening the configurator updates the installed native binary and packaged scripts and adds any newly introduced default INI settings that are missing from an older installation.
 
 ## Reverting an account
 
@@ -285,13 +286,13 @@ It enumerates active and unplugged render endpoints and tries to identify:
 
 It presets each independently. If it cannot identify a distinct public endpoint, it errs on the quiet side and treats the best available endpoint as public.
 
-To use the packaged copy, select:
+On opening the configurator, the packaged copy is installed as:
 
 ```text
 C:\ProgramData\RestrictedShell\scripts\InitializeAudioVolumes.ps1
 ```
 
-as the pre-run program after installation, or select the copy from the extracted package when configuring the account; setup rewrites packaged-script paths to their protected installed location.
+The pre-run file picker opens in that directory, so the example can be selected on the first configuration run.
 
 A pre-run failure prevents the main target from being launched, so a failed audio-safety initialization is not silently ignored.
 
