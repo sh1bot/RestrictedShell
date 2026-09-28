@@ -4,7 +4,9 @@ RestrictedShell converts an existing local Windows user account into a **single-
 
 When the converted account signs in, Windows starts one configured application instead of the normal Explorer desktop. RestrictedShell can then remove common routes from that application into the rest of Windows: it can block shell and application-switching shortcuts, disable Task Manager for that account, optionally prevent the target application from launching child processes, and log the user off when the target application exits.
 
-It fills a similar niche to kiosk mode, but is intended to be easy to apply to an ordinary local account and later remove again. Other accounts on the PC continue to use Windows normally, and **Revert Account** restores the converted account's recorded shell, Task Manager policy, and password settings.
+RestrictedShell is best thought of as a lightweight, reversible alternative to Windows [Shell Launcher](https://learn.microsoft.com/en-us/windows/configuration/shell-launcher/): it turns a normal local account into a single-application login by replacing Explorer for that user, while adding conveniences such as shortcut blocking, Task Manager restriction, child-process suppression, logoff-on-exit, and basic audio controls. Its goal is **simple access to one application**, not a fully locked-down public kiosk; if you need a more strongly managed kiosk or restricted-user environment, Windows [Assigned Access](https://learn.microsoft.com/en-us/windows/configuration/kiosk-methods) may be a better fit, while Shell Launcher is the closer Microsoft equivalent when you specifically want to replace Explorer with a desktop application.
+
+Other accounts on the PC continue to use Windows normally, and **Revert Account** restores the converted account's recorded shell, Task Manager policy, and password settings.
 
 Typical uses include a supervised child account, a public or library PC running one application, a temporary game/demo station, or an appliance-style application that should not expose the normal Windows desktop.
 
