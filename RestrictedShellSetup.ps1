@@ -793,6 +793,19 @@ function Install-AccountPicture {
     }
 }
 
+# Install/update the runtime and bundled scripts before showing the form. This
+# makes packaged pre-run scripts available on the very first configuration run.
+try {
+    Install-RestrictedShell
+}
+catch {
+    [Windows.Forms.MessageBox]::Show(
+        $_.Exception.Message,
+        'RestrictedShell setup failed'
+    ) | Out-Null
+    exit 1
+}
+
 $form = [Windows.Forms.Form]@{
     Text = 'Restricted Account Configurator'
     Width = 700
@@ -901,7 +914,11 @@ $revertButton = [Windows.Forms.Button]@{ Text = 'Revert Account'; Left = 545; To
 $form.Controls.AddRange(@($status, $convertButton, $revertButton))
 
 $executableDialog = [Windows.Forms.OpenFileDialog]@{ Filter = 'Executables|*.exe' }
-$preRunDialog = [Windows.Forms.OpenFileDialog]@{ Filter = 'Programs/scripts|*.exe;*.com;*.bat;*.cmd;*.ps1;*.py;*.pyw|All files|*.*' }
+$preRunDialog = [Windows.Forms.OpenFileDialog]@{
+    Filter = 'Programs/scripts|*.exe;*.com;*.bat;*.cmd;*.ps1;*.py;*.pyw|All files|*.*'
+    InitialDirectory = $installedScriptsDir
+    RestoreDirectory = $true
+}
 $pictureDialog = [Windows.Forms.OpenFileDialog]@{ Filter = 'Pictures/icons/apps|*.ico;*.png;*.jpg;*.jpeg;*.bmp;*.exe|All files|*.*' }
 
 function Set-PicturePreview {
@@ -1035,8 +1052,6 @@ $convertButton.Add_Click({
     $changesStarted = $false
 
     try {
-        Install-RestrictedShell
-
         $user = Get-SelectedUser
         if (-not $user) {
             throw 'Select an account.'
