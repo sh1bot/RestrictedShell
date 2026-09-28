@@ -377,7 +377,7 @@ For example, from an elevated Command Prompt:
 net user alice /times:M-F,15:00-20:00;Sa-Su,08:00-20:00
 ```
 
-resticts `alice` to those sign-in windows. To remove the restriction:
+restricts `alice` to those sign-in windows. To remove the restriction:
 
 ```cmd
 net user alice /times:all
