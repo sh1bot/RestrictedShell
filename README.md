@@ -1,10 +1,16 @@
 # RestrictedShell
 
-RestrictedShell is a small replacement Windows shell for a deliberately restricted local account. Instead of starting Explorer, the account starts one configured application. RestrictedShell also provides basic volume and microphone controls, can block common shell/application-switching escape routes, and can log the account off when the target application exits.
+RestrictedShell converts an existing local Windows user account into a **single-application login**.
 
-It is intended for appliance-like or supervised accounts: for example, a PC that should run one game, educational application, kiosk-style application, or other controlled program without presenting the normal Windows desktop.
+When the converted account signs in, Windows starts one configured application instead of the normal Explorer desktop. RestrictedShell can then remove common routes from that application into the rest of Windows: it can block shell and application-switching shortcuts, disable Task Manager for that account, optionally prevent the target application from launching child processes, and log the user off when the target application exits.
 
-RestrictedShell does **not** turn an arbitrary Windows application into a complete security sandbox. Read [Security assumptions and limitations](#security-assumptions-and-limitations) before relying on it for a hostile user.
+It fills a similar niche to kiosk mode, but is intended to be easy to apply to an ordinary local account and later remove again. Other accounts on the PC continue to use Windows normally, and **Revert Account** restores the converted account's recorded shell, Task Manager policy, and password settings.
+
+Typical uses include a supervised child account, a public or library PC running one application, a temporary game/demo station, or an appliance-style application that should not expose the normal Windows desktop.
+
+RestrictedShell also keeps basic volume and microphone controls available even though Explorer is not running.
+
+RestrictedShell is **not a complete application sandbox or application-control system**. It removes convenient escape routes and can add some containment, but the configured application itself must still be suitable for the user. See [Security assumptions and limitations](#security-assumptions-and-limitations) and [Further Windows restrictions](#further-windows-restrictions) if you need stronger controls.
 
 ## Download
 
@@ -341,6 +347,45 @@ PrivateVolume=60
 `PreRunInterpreter` is written by the configurator for Python pre-run scripts. It should not normally be set by hand.
 
 Sections named `[Setup:username]` contain rollback metadata used by the configurator. RestrictedShell itself ignores them. Do not delete or edit those sections while the corresponding account is converted unless you are deliberately abandoning its rollback information.
+
+## Further Windows restrictions
+
+RestrictedShell deliberately does not configure machine-wide application-control or account-scheduling policy. Those controls can be added separately when the deployment needs them.
+
+### AppLocker
+
+If the converted account should be prevented from launching other executables or scripts even when the target application exposes an unexpected launch path, consider supplementing RestrictedShell with **AppLocker**.
+
+AppLocker can allow or deny executables, scripts, Windows Installer files, DLLs, and packaged apps, and rules can be scoped to particular users or groups. Microsoft describes AppLocker as a **defense-in-depth** feature rather than a complete security boundary; for stronger application control Microsoft recommends evaluating App Control for Business.
+
+RestrictedShell does not create, modify, or remove AppLocker rules. Application-control policy can lock administrators out of tools they need for recovery if it is prepared incorrectly, so build and test the policy separately before enforcing it on a machine you care about.
+
+Useful Microsoft documentation:
+
+- [What is AppLocker?](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/applocker/what-is-applocker)
+- [Requirements to use AppLocker](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/applocker/requirements-to-use-applocker)
+- [Understanding AppLocker default rules](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/applocker/understanding-applocker-default-rules)
+- [Understanding AppLocker rule behavior](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/applocker/understanding-applocker-rule-behavior)
+
+### Limit when the local account may sign in
+
+Windows can restrict the days and times during which a local account is permitted to sign in. This is independent of RestrictedShell.
+
+For example, from an elevated Command Prompt:
+
+```cmd
+net user alice /times:M-F,15:00-20:00;Sa-Su,08:00-20:00
+```
+
+resticts `alice` to those sign-in windows. To remove the restriction:
+
+```cmd
+net user alice /times:all
+```
+
+Windows accepts multiple day/time ranges and requires the times to be specified in one-hour increments. See Microsoft's [`net user` documentation](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/net-user) for the complete syntax.
+
+The `/times` setting controls when the account is permitted to sign in. Environments that also need Windows to lock, disconnect, or log off a session when permitted hours expire can consult Microsoft's [LogonHours policy documentation](https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-admx-winlogon#logonhourspolicydescription) and check its edition/deployment requirements.
 
 ## Security assumptions and limitations
 
